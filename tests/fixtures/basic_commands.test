@@ -1,0 +1,29 @@
+# Basic command tests
+--echo hello world
+--sleep 1
+--skip skipping this test
+--die fatal error occurred
+--exit
+
+# Variable tests
+--let $var1 = hello
+--let $var2 = `SELECT 1`
+--inc $var1
+--dec $var1
+
+# Error tests
+--error 1064
+SELECT bad syntax;
+--error ER_BAD_TABLE_ERROR, 1051
+DROP TABLE nonexistent;
+
+# Source test
+--source include/test.inc
+
+# Toggle tests
+--disable_warnings
+--enable_warnings
+--disable_query_log
+--enable_query_log
+--disable_abort_on_error
+--enable_abort_on_error

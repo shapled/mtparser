@@ -1,0 +1,22 @@
+# File I/O tests
+--write_file /tmp/test_file.txt END_OF_FILE
+line 1
+line 2
+line 3
+END_OF_FILE
+
+--append_file /tmp/test_file.txt END_OF_FILE
+line 4
+END_OF_FILE
+
+--remove_file /tmp/test_file.txt
+
+--mkdir /tmp/test_dir
+--rmdir /tmp/test_dir
+
+--copy_file /tmp/a.txt /tmp/b.txt
+--move_file /tmp/b.txt /tmp/c.txt
+--diff_files /tmp/a.txt /tmp/c.txt
+--chmod 644 /tmp/a.txt
+--file_exists /tmp/a.txt
+--cat_file /tmp/test_file.txt

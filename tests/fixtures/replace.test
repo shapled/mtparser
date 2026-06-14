@@ -1,0 +1,8 @@
+# Result modifier tests
+--replace_result a b
+--replace_column 1 old new
+--replace_regex /pattern/replacement/
+--sorted_result
+--replace_numeric_round 2
+--horizontal_results
+--vertical_results

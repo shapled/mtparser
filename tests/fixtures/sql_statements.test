@@ -1,0 +1,16 @@
+# SQL statements (no -- prefix, terminated by delimiter)
+SELECT 1;
+CREATE TABLE t1 (a INT, b VARCHAR(100));
+INSERT INTO t1 VALUES (1, 'hello');
+UPDATE t1 SET b = 'world' WHERE a = 1;
+DELETE FROM t1 WHERE a = 1;
+DROP TABLE t1;
+
+# Multi-line SQL
+SELECT a, b, c
+  FROM t1
+  WHERE a > 1
+  ORDER BY b;
+
+# Empty statements (bare delimiter)
+;

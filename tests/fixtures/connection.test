@@ -1,0 +1,10 @@
+# Connection tests
+--connect(con1, localhost, root, , test)
+connection con1;
+disconnect con1;
+connection default;
+
+# Connection with params
+--connect(con2, 127.0.0.1, root, pass, mydb, 3306)
+connection con2;
+disconnect con2;

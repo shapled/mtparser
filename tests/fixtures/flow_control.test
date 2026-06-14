@@ -1,0 +1,29 @@
+# Flow control tests
+--echo start
+
+--if (`SELECT 1 = 1`)
+{
+  --echo inside true if
+  SELECT 1;
+}
+
+--if (`SELECT 1 = 0`)
+{
+  --echo should not appear
+}
+
+--echo between ifs
+
+--if (!$undefined_var)
+{
+  --echo var is not set
+}
+
+--let $counter = 3;
+--while ($counter)
+{
+  --echo counter is $counter
+  --dec $counter
+}
+
+--echo end

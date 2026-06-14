@@ -1,0 +1,22 @@
+[package]
+name = "mtparser"
+version = "0.1.0"
+edition = "2024"
+description = "MySQL mysqltest test file parser — parses .test/.inc files into a typed AST"
+license = "Apache-2.0"
+repository = "https://github.com/zhangxiaopeng20/mtparser"
+readme = "README.md"
+keywords = ["mysql", "mysqltest", "mtr", "parser", "ast"]
+categories = ["parser-implementations", "development-tools"]
+
+[lib]
+name = "mtparser"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mtparser"
+path = "src/main.rs"
+
+[dependencies]
+winnow = "1.0"
+thiserror = "2"

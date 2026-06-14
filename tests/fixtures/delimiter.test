@@ -1,0 +1,13 @@
+# Delimiter change test
+SELECT 1;
+
+delimiter ||
+CREATE TRIGGER t1_bi
+BEFORE INSERT ON t1
+FOR EACH ROW
+BEGIN
+  SELECT 1;
+END||
+delimiter ;
+
+SELECT 2;
