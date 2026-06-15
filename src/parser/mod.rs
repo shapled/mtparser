@@ -17,28 +17,26 @@ use winnow::Parser;
 use crate::ast::span::Span;
 use crate::ast::statement::*;
 use crate::ast::TestFile;
-use crate::error::{ParseError, ParseMode};
+use crate::error::ParseError;
 use crate::version::MysqlVersion;
 
 /// Parser configuration. Created once and cannot be modified after creation.
 #[derive(Debug, Clone)]
 pub struct ParserConfig {
     pub version: MysqlVersion,
-    pub mode: ParseMode,
 }
 
 impl Default for ParserConfig {
     fn default() -> Self {
         Self {
-            version: MysqlVersion::V80,
-            mode: ParseMode::Strict,
+            version: MysqlVersion::Compatible,
         }
     }
 }
 
 impl ParserConfig {
-    pub fn new(version: MysqlVersion, mode: ParseMode) -> Self {
-        Self { version, mode }
+    pub fn new(version: MysqlVersion) -> Self {
+        Self { version }
     }
 }
 
@@ -197,7 +195,9 @@ fn parse_statements(
                 }
                 "write_file" => {
                     let rest = trimmed[first_word.len()..].trim();
-                    let rest = rest.strip_suffix(&ctx.delimiter).unwrap_or(rest).trim();
+                    // Strip trailing delimiter, but only after quotes are handled
+                    // to avoid cutting inside quoted filenames like "file;name"
+                    let rest = strip_trailing_delimiter_quoted(rest, &ctx.delimiter);
                     let (stmt, new_pos, new_ln) =
                         parse_write_file_block(rest, input, pos + line_len, line_num, span)?;
                     statements.push(stmt);
@@ -207,7 +207,7 @@ fn parse_statements(
                 }
                 "append_file" => {
                     let rest = trimmed[first_word.len()..].trim();
-                    let rest = rest.strip_suffix(&ctx.delimiter).unwrap_or(rest).trim();
+                    let rest = strip_trailing_delimiter_quoted(rest, &ctx.delimiter);
                     let (stmt, new_pos, new_ln) =
                         parse_append_file_block(rest, input, pos + line_len, line_num, span)?;
                     statements.push(stmt);
@@ -299,7 +299,8 @@ pub(crate) fn classify_command(word: &str) -> CommandKind {
         | "disable_session_track_info" | "enable_session_track_info"
         | "disable_testcase" | "enable_testcase"
         | "disable_parsing" | "enable_parsing"
-        | "disable_async_client" | "enable_async_client" => {
+        | "disable_async_client" | "enable_async_client"
+        | "disable_prepare_warnings" | "enable_prepare_warnings" => {
             CommandKind::Known(lower)
         }
         _ => CommandKind::Unknown,
@@ -331,7 +332,7 @@ fn parse_if_block(
     start_line: u32,
     span: Span,
 ) -> Result<(IfBlock, usize, u32), ParseError> {
-    let condition = flow::parse_condition(condition_text, ctx.config.mode)?;
+    let condition = flow::parse_condition(condition_text, ctx.config.version)?;
     let brace_on_first_line = condition_text.trim().ends_with('{');
     let (open_brace_pos, open_brace_line) = if brace_on_first_line {
         (after_first_line, start_line + 1)
@@ -353,7 +354,7 @@ fn parse_while_block(
     start_line: u32,
     span: Span,
 ) -> Result<(WhileBlock, usize, u32), ParseError> {
-    let condition = flow::parse_condition(condition_text, ctx.config.mode)?;
+    let condition = flow::parse_condition(condition_text, ctx.config.version)?;
     let brace_on_first_line = condition_text.trim().ends_with('{');
     let (open_brace_pos, open_brace_line) = if brace_on_first_line {
         (after_first_line, start_line + 1)
@@ -448,7 +449,7 @@ fn parse_bare_flow_block(
         let same_line = &input[body_start..body_start + same_line_end];
         if let Some(close_pos) = same_line.rfind('}') {
             let body_text = same_line[..close_pos].trim();
-            let condition = flow::parse_condition(&condition_text, ctx.config.mode)?;
+            let condition = flow::parse_condition(&condition_text, ctx.config.version)?;
             let body_stmts = if body_text.is_empty() {
                 vec![Statement::Empty]
             } else {
@@ -468,7 +469,7 @@ fn parse_bare_flow_block(
     }
 
     // Body continues on subsequent lines
-    let condition = flow::parse_condition(&condition_text, ctx.config.mode)?;
+    let condition = flow::parse_condition(&condition_text, ctx.config.version)?;
     let (body, after_body_pos, after_body_line) =
         parse_statements(ctx, input, body_start, body_line)?;
     let (end_pos, end_line) = consume_close_brace(input, after_body_pos, after_body_line)?;
@@ -534,11 +535,50 @@ fn parse_perl_block(
     Ok((PerlBlock { span, end_marker: end_marker.to_string(), content: content.into() }, new_pos, new_ln))
 }
 
+/// Strip a trailing delimiter from the argument string, respecting quotes.
+/// e.g. `"file;name" EOF;` → `"file;name" EOF` (the ; inside quotes is kept).
+fn strip_trailing_delimiter_quoted<'a>(s: &'a str, delimiter: &str) -> &'a str {
+    let s = s.trim();
+    // Simple fast path: no quotes in the string
+    if !s.contains('"') && !s.contains('\'') && !s.contains('`') {
+        return s.strip_suffix(delimiter).unwrap_or(s).trim();
+    }
+    // Count quote nesting and only strip delimiter after the outermost close
+    let mut depth = 0u32;
+    let mut quote_char: char = '\0';
+    let bytes = s.as_bytes();
+    for i in 0..bytes.len() {
+        let c = bytes[i] as char;
+        if depth == 0 && (c == '"' || c == '\'' || c == '`') {
+            depth = 1;
+            quote_char = c;
+        } else if depth > 0 && c == quote_char {
+            depth = 0;
+        }
+    }
+    if depth == 0 {
+        // All quotes closed — safe to strip delimiter from the end
+        s.strip_suffix(delimiter).unwrap_or(s).trim()
+    } else {
+        // Unclosed quotes — don't strip
+        s
+    }
+}
+
 /// Parse filename and END_MARKER from arguments.
 fn parse_file_args(args: &str) -> Result<(String, String), ParseError> {
-    let parts: Vec<&str> = args.splitn(2, ' ').collect();
-    let filename = parts[0].trim().to_string();
-    let end_marker = parts.get(1).map(|s| s.trim().to_string()).unwrap_or_else(|| "EOF".to_string());
+    let trimmed = args.trim();
+    let unquoted = command::strip_quotes(trimmed);
+    // If strip_quotes actually removed outer quotes, the entire content is the filename
+    // (the filename may contain spaces). Only split on space if no quotes were stripped.
+    let (filename, end_marker) = if unquoted.len() < trimmed.len() {
+        (unquoted.trim().to_string(), "EOF".to_string())
+    } else {
+        let parts: Vec<&str> = unquoted.splitn(2, ' ').collect();
+        let fname = parts[0].trim().to_string();
+        let marker = parts.get(1).map(|s| s.trim().to_string()).unwrap_or_else(|| "EOF".to_string());
+        (fname, marker)
+    };
     if filename.is_empty() {
         return Err(ParseError::Syntax { message: "filename must not be empty".to_string(), span: Span::dummy() });
     }

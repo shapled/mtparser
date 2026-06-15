@@ -1,4 +1,4 @@
-//! Error types and parse modes for the mysqltest parser.
+//! Error types for the mysqltest parser.
 
 use crate::ast::Span;
 
@@ -49,18 +49,9 @@ pub enum ParseError {
     InvalidExpression { message: String, span: Span },
 }
 
-/// Diagnostic with severity level for non-fatal issues (used in lenient mode).
+/// Diagnostic with severity level for non-fatal issues.
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     pub message: String,
     pub span: Span,
-}
-
-/// Parse mode: strict or lenient.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParseMode {
-    /// Unknown commands cause an error (default).
-    Strict,
-    /// Unknown commands are treated as SQL statements with a warning.
-    Lenient,
 }

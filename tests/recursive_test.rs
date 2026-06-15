@@ -1,4 +1,3 @@
-use mtparser::error::ParseMode;
 use mtparser::parser::{parse, ParserConfig};
 use mtparser::version::MysqlVersion;
 use std::fs;
@@ -25,16 +24,16 @@ fn find_test_files(dir: &Path) -> Vec<std::path::PathBuf> {
     files
 }
 
-/// Parse all .test/.inc files in a directory in strict mode.
+/// Parse all .test/.inc files in a directory.
 /// Returns (total_files, success_count, failure_files_with_errors).
-fn test_directory_strict(dir: &Path, version: MysqlVersion) -> (usize, usize, Vec<(std::path::PathBuf, String)>) {
+fn test_directory(dir: &Path, version: MysqlVersion) -> (usize, usize, Vec<(std::path::PathBuf, String)>) {
     let files = find_test_files(dir);
     let total = files.len();
     let mut success = 0usize;
     let mut failures = Vec::new();
 
     for filepath in &files {
-        let config = ParserConfig::new(version, ParseMode::Strict);
+        let config = ParserConfig::new(version);
         let content = match fs::read_to_string(filepath) {
             Ok(c) => c,
             Err(e) => {
@@ -59,7 +58,7 @@ fn test_directory_strict(dir: &Path, version: MysqlVersion) -> (usize, usize, Ve
 #[test]
 fn test_fixtures_directory_strict() {
     let dir = Path::new("tests/fixtures");
-    let (total, success, failures) = test_directory_strict(dir, MysqlVersion::V80);
+    let (total, success, failures) = test_directory(dir, MysqlVersion::Compatible);
     assert_eq!(total, success, "all fixtures should parse successfully:\n{:#?}", failures);
 }
 
@@ -73,7 +72,7 @@ fn test_mysql_test_dir() {
     let dir = std::env::var("MYSQL_TEST_DIR")
         .expect("MYSQL_TEST_DIR env var not set. Usage: MYSQL_TEST_DIR=/path/to/mysql-server/mysql-test cargo test test_mysql_test_dir -- --ignored");
     let dir = Path::new(&dir);
-    let (total, success, failures) = test_directory_strict(dir, MysqlVersion::V57);
+    let (total, success, failures) = test_directory(dir, MysqlVersion::Compatible);
 
     println!("\n=== MySQL Test Directory Results ===");
     println!("Total files: {}", total);
@@ -102,7 +101,7 @@ fn test_mysql_include_dir() {
     let dir = std::env::var("MYSQL_INCLUDE_DIR")
         .expect("MYSQL_INCLUDE_DIR env var not set. Usage: MYSQL_INCLUDE_DIR=/path/to/mysql-server/mysql-test/include cargo test test_mysql_include_dir -- --ignored");
     let dir = Path::new(&dir);
-    let (total, success, failures) = test_directory_strict(dir, MysqlVersion::V80);
+    let (total, success, failures) = test_directory(dir, MysqlVersion::Compatible);
 
     println!("\n=== MySQL Include Directory Results ===");
     println!("Total files: {}", total);

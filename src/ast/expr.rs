@@ -26,6 +26,20 @@ impl QueryExpr {
     }
 }
 
+/// A MariaDB $() expression: $(1 + 2), $($x > 0 && $y < 10), etc.
+/// Also used for && / || logical expressions at top level.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MariaDBExpr {
+    pub span: Span,
+    pub expression: String,
+}
+
+impl MariaDBExpr {
+    pub fn new(span: Span, expression: String) -> Self {
+        Self { span, expression }
+    }
+}
+
 /// Comparison operators for expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComparisonOp {
@@ -51,10 +65,8 @@ pub enum ComparisonRhs {
 pub enum Expr {
     /// $variable_name
     Variable(VariableRef),
-    /// !$variable_name
-    NegatedVariable(VariableRef),
-    /// !`SELECT ...`
-    NegatedQuery(QueryExpr),
+    /// !expr — negation of any expression
+    Negated(Box<Expr>),
     /// Integer literal
     Integer(i64),
     /// `SELECT ...`
@@ -65,4 +77,6 @@ pub enum Expr {
         operator: ComparisonOp,
         right: Box<ComparisonRhs>,
     },
+    /// MariaDB $() expression or &&/|| logical expression
+    MariaDB(MariaDBExpr),
 }

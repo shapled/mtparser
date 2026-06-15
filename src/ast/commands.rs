@@ -300,6 +300,8 @@ pub enum ToggleKind {
     // 5.7 only
     Parsing,
     AsyncClient,
+    // MariaDB only
+    PrepareWarnings,
 }
 
 /// `--delimiter new_delimiter` or `delimiter new_delimiter;`

@@ -10,11 +10,12 @@
 //! - MySQL 8.4
 //! - MySQL 9.7
 //!
+//! Default is `MysqlVersion::Compatible`, which accepts commands from any version.
+//!
 //! ## Quick Start
 //!
 //! ```
 //! use mtparser::parser::{parse, ParserConfig};
-//! use mtparser::version::MysqlVersion;
 //!
 //! let input = "--echo \"hello\"\nSELECT 1;\n";
 //! let config = ParserConfig::default();

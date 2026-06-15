@@ -7,6 +7,25 @@ use crate::ast::text::InterpolatedText;
 use crate::ast::Span;
 use crate::error::ParseError;
 use crate::parser::ParseContext;
+use crate::version::MysqlVersion;
+
+/// Strip surrounding quotes from an ARG_STRING argument.
+/// mysqltest.cc treats `'`, `` ` ``, `"` as delimiters for ARG_STRING parameters:
+/// if the argument starts with a quote, find the matching close and return the inner text.
+pub(crate) fn strip_quotes(s: &str) -> &str {
+    let s = s.trim();
+    if s.is_empty() {
+        return s;
+    }
+    let first = s.as_bytes()[0];
+    if first == b'"' || first == b'\'' || first == b'`' {
+        if let Some(pos) = s[1..].find(char::from(first)) {
+            return &s[1..pos + 1];
+        }
+        // No matching close quote — return as-is (mysqltest.cc does the same)
+    }
+    s
+}
 
 /// Parse a known command by name.
 pub(crate) fn parse_known_command(
@@ -17,24 +36,18 @@ pub(crate) fn parse_known_command(
 ) -> Result<Statement, ParseError> {
     // Check version compatibility for version-specific commands
     if !ctx.config.version.has_command(name) {
-        if ctx.config.mode == crate::error::ParseMode::Strict {
-            return Err(ParseError::VersionMismatch {
-                command: name.to_string(),
-                version: format!("{:?}", ctx.config.version),
-                span,
-            });
-        }
-        return Ok(Statement::Sql(SqlStatement {
+        return Err(ParseError::VersionMismatch {
+            command: name.to_string(),
+            version: format!("{:?}", ctx.config.version),
             span,
-            sql: input.trim().into(),
-        }));
+        });
     }
 
     let args = skip_command_name(name, input);
 
     match name {
         "echo" => Ok(Statement::Echo(EchoCmd { span, text: args.trim().into() })),
-        "source" => Ok(Statement::Source(SourceCmd { span, file: args.trim().into() })),
+        "source" => Ok(Statement::Source(SourceCmd { span, file: strip_quotes(args).into() })),
         "skip" => Ok(Statement::Skip(SkipCmd { span, message: { let m = args.trim(); if m.is_empty() { None } else { Some(m.into()) } } })),
         "die" => Ok(Statement::Die(DieCmd { span, message: { let m = args.trim(); if m.is_empty() { None } else { Some(m.into()) } } })),
         "exit" => Ok(Statement::Exit(ExitCmd { span })),
@@ -66,7 +79,7 @@ pub(crate) fn parse_known_command(
         "sorted_result" => Ok(Statement::SortedResult(SortedResultCmd { span })),
         "replace_result" => parse_replace_result(args, span),
         "replace_column" => parse_replace_column(args, span),
-        "replace_regex" => parse_replace_regex(args, span),
+        "replace_regex" => parse_replace_regex(ctx, args, span),
         "partially_sorted_result" => Ok(Statement::PartiallySortedResult(PartiallySortedResultCmd { span, columns: args.trim().to_string() })),
         "replace_numeric_round" => Ok(Statement::ReplaceNumericRound(ReplaceNumericRoundCmd { span, decimals: args.trim().to_string() })),
 
@@ -81,7 +94,8 @@ pub(crate) fn parse_known_command(
         | "disable_session_track_info" | "enable_session_track_info"
         | "disable_testcase" | "enable_testcase"
         | "disable_parsing" | "enable_parsing"
-        | "disable_async_client" | "enable_async_client" => {
+        | "disable_async_client" | "enable_async_client"
+        | "disable_prepare_warnings" | "enable_prepare_warnings" => {
             parse_toggle(name, args, span)
         }
 
@@ -94,18 +108,18 @@ pub(crate) fn parse_known_command(
             Ok(Statement::Delimiter(DelimiterCmd { span, new_delimiter: new_delim }))
         }
 
-        "write_file" => Ok(Statement::WriteFile(WriteFileCmd { span, filename: args.trim().into(), end_marker: String::new(), content: String::new().into() })),
-        "append_file" => Ok(Statement::AppendFile(AppendFileCmd { span, filename: args.trim().into(), end_marker: String::new(), content: String::new().into() })),
+        "write_file" => Ok(Statement::WriteFile(WriteFileCmd { span, filename: strip_quotes(args).into(), end_marker: String::new(), content: String::new().into() })),
+        "append_file" => Ok(Statement::AppendFile(AppendFileCmd { span, filename: strip_quotes(args).into(), end_marker: String::new(), content: String::new().into() })),
         "remove_file" => parse_remove_file(args, span),
         "remove_files_wildcard" => parse_remove_files_wildcard(args, span),
         "copy_file" => parse_copy_file(args, span),
         "move_file" => parse_move_file(args, span),
-        "mkdir" => Ok(Statement::Mkdir(MkdirCmd { span, dir: args.trim().into() })),
-        "rmdir" => Ok(Statement::Rmdir(RmdirCmd { span, dir: args.trim().into() })),
+        "mkdir" => Ok(Statement::Mkdir(MkdirCmd { span, dir: strip_quotes(args).into() })),
+        "rmdir" => Ok(Statement::Rmdir(RmdirCmd { span, dir: strip_quotes(args).into() })),
         "chmod" => parse_chmod(args, span),
         "diff_files" => parse_diff_files(args, span),
-        "file_exists" => Ok(Statement::FileExists(FileExistsCmd { span, file: args.trim().into() })),
-        "cat_file" => Ok(Statement::CatFile(CatFileCmd { span, file: args.trim().into() })),
+        "file_exists" => Ok(Statement::FileExists(FileExistsCmd { span, file: strip_quotes(args).into() })),
+        "cat_file" => Ok(Statement::CatFile(CatFileCmd { span, file: strip_quotes(args).into() })),
         "list_files" => parse_list_files(args, span),
 
         "shutdown_server" => Ok(Statement::ShutdownServer(ShutdownServerCmd { span })),
@@ -117,10 +131,7 @@ pub(crate) fn parse_known_command(
 
         "assert" => {
             if !ctx.config.version.has_assert() {
-                if ctx.config.mode == crate::error::ParseMode::Strict {
-                    return Err(ParseError::VersionMismatch { command: "assert".to_string(), version: format!("{:?}", ctx.config.version), span });
-                }
-                return Ok(Statement::Sql(SqlStatement { span, sql: input.trim().into() }));
+                return Err(ParseError::VersionMismatch { command: "assert".to_string(), version: format!("{:?}", ctx.config.version), span });
             }
             Ok(Statement::Sql(SqlStatement { span, sql: input.trim().into() }))
         }
@@ -265,7 +276,16 @@ fn parse_replace_column(args: &str, span: Span) -> Result<Statement, ParseError>
 }
 
 /// Parse `--replace_regex s/pattern/replacement/flags` or `/pattern/replacement/flags`.
-fn parse_replace_regex(args: &str, span: Span) -> Result<Statement, ParseError> {
+fn parse_replace_regex(ctx: &ParseContext, args: &str, span: Span) -> Result<Statement, ParseError> {
+    parse_replace_regex_versioned(args, span, &ctx.config.version)
+}
+
+/// Parse `--replace_regex` with version-aware syntax.
+///
+/// MySQL: only `s/pattern/replacement/flags` or `/pattern/replacement/flags`.
+/// MariaDB: any single-char delimiter, paired delimiters `()`, `[]`, `{}`, `<>`,
+/// backslash escaping, and the `s/` prefix is treated as regular single-char delimiter.
+fn parse_replace_regex_versioned(args: &str, span: Span, version: &MysqlVersion) -> Result<Statement, ParseError> {
     let trimmed = args.trim();
 
     // $var form: store the pattern for later variable expansion
@@ -278,7 +298,19 @@ fn parse_replace_regex(args: &str, span: Span) -> Result<Statement, ParseError> 
         }));
     }
 
-    // Determine the separator from the prefix: "s/" or "/"
+    if trimmed.is_empty() {
+        return Err(ParseError::Syntax { message: "empty replace_regex".to_string(), span });
+    }
+
+    if version.is_mariadb() {
+        parse_replace_regex_mariadb(trimmed, span)
+    } else {
+        parse_replace_regex_mysql(trimmed, span)
+    }
+}
+
+/// MySQL replace_regex: only `s/pattern/replacement/flags` or `/pattern/replacement/flags`.
+fn parse_replace_regex_mysql(trimmed: &str, span: Span) -> Result<Statement, ParseError> {
     let (rest, sep) = if let Some(rest) = trimmed.strip_prefix("s/") {
         (rest, '/')
     } else if let Some(rest) = trimmed.strip_prefix('/') {
@@ -287,7 +319,6 @@ fn parse_replace_regex(args: &str, span: Span) -> Result<Statement, ParseError> 
         return Err(ParseError::Syntax { message: format!("invalid replace_regex syntax: {}", trimmed), span });
     };
 
-    // Find separator positions within the rest
     let sep1 = rest.find(sep).unwrap_or(rest.len());
     let pattern = rest[..sep1].to_string();
     let after1 = if sep1 < rest.len() { &rest[sep1 + 1..] } else { "" };
@@ -304,6 +335,79 @@ fn parse_replace_regex(args: &str, span: Span) -> Result<Statement, ParseError> 
     Ok(Statement::ReplaceRegex(ReplaceRegexCmd { span, pattern, replacement, flags }))
 }
 
+/// MariaDB replace_regex: supports paired delimiters, arbitrary single-char delimiters,
+/// and backslash escaping. Mirrors `parse_re_part` in MariaDB's mysqltest.cc.
+fn parse_replace_regex_mariadb(trimmed: &str, span: Span) -> Result<Statement, ParseError> {
+    let first = trimmed.as_bytes()[0];
+
+    // Determine delimiter pair from first character
+    let (pattern_close, rest_after_pattern) = match first {
+        b'(' => (b')', &trimmed[1..]),
+        b'[' => (b']', &trimmed[1..]),
+        b'{' => (b'}', &trimmed[1..]),
+        b'<' => (b'>', &trimmed[1..]),
+        _ => (first, &trimmed[1..]),
+    };
+
+    let (pattern, rest) = scan_regex_part(rest_after_pattern, pattern_close);
+    let rest = rest.trim_start();
+
+    // Determine replacement delimiter:
+    // If pattern used paired delimiters (first != pattern_close), the first char of rest
+    // determines a new delimiter pair. Otherwise reuse the same character.
+    let (replacement_close, rest_after_replacement) = if rest.is_empty() {
+        (pattern_close, "")
+    } else if first != pattern_close {
+        let re_first = rest.as_bytes()[0];
+        let re_close = match re_first {
+            b'(' => b')',
+            b'[' => b']',
+            b'{' => b'}',
+            b'<' => b'>',
+            _ => re_first,
+        };
+        (re_close, &rest[1..])
+    } else {
+        (pattern_close, rest)
+    };
+
+    let (replacement, after_replacement) = scan_regex_part(rest_after_replacement, replacement_close);
+
+    // Check for flags (only 'i' recognized)
+    let flags_str = after_replacement.trim_start();
+    let flags = if flags_str.starts_with('i') {
+        Some("i".to_string())
+    } else if !flags_str.is_empty() {
+        Some(flags_str.to_string())
+    } else {
+        None
+    };
+
+    Ok(Statement::ReplaceRegex(ReplaceRegexCmd { span, pattern, replacement, flags }))
+}
+
+/// Scan input until an unescaped occurrence of `delimiter` is found.
+/// Backslash escapes the delimiter character (the backslash itself is consumed).
+/// Returns (scanned_content, remaining_input).
+fn scan_regex_part(input: &str, delimiter: u8) -> (String, &str) {
+    let mut result = String::new();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == delimiter {
+            i += 1; // skip backslash
+            result.push(bytes[i] as char);
+        } else if bytes[i] == delimiter {
+            return (result, &input[i + 1..]);
+        } else {
+            result.push(bytes[i] as char);
+        }
+        i += 1;
+    }
+    // delimiter not found — return what we have with empty remaining
+    (result, "")
+}
+
 fn parse_toggle(name: &str, args: &str, span: Span) -> Result<Statement, ParseError> {
     let (enabled, kind) = if let Some(k) = name.strip_prefix("enable_") { (true, toggle_kind(k)) } else if let Some(k) = name.strip_prefix("disable_") { (false, toggle_kind(k)) } else { return Err(ParseError::UnknownCommand { command: name.to_string(), span, suggestion: None }); };
     let once = args.trim().eq_ignore_ascii_case("ONCE");
@@ -317,46 +421,47 @@ fn toggle_kind(name: &str) -> ToggleKind {
         "reconnect" => ToggleKind::Reconnect, "connect_log" => ToggleKind::ConnectLog,
         "session_track_info" => ToggleKind::SessionTrackInfo, "testcase" => ToggleKind::Testcase,
         "parsing" => ToggleKind::Parsing, "async_client" => ToggleKind::AsyncClient,
+        "prepare_warnings" => ToggleKind::PrepareWarnings,
         _ => ToggleKind::Warnings,
     }
 }
 
 fn parse_remove_file(args: &str, span: Span) -> Result<Statement, ParseError> {
     let parts: Vec<&str> = args.split_whitespace().collect();
-    Ok(Statement::RemoveFile(RemoveFileCmd { span, file: (*parts.first().unwrap_or(&"")).into(), timeout: parts.get(1).map(|s| s.to_string()) }))
+    Ok(Statement::RemoveFile(RemoveFileCmd { span, file: strip_quotes(parts.first().unwrap_or(&"")).into(), timeout: parts.get(1).map(|s| s.to_string()) }))
 }
 
 fn parse_remove_files_wildcard(args: &str, span: Span) -> Result<Statement, ParseError> {
     let parts: Vec<&str> = args.split_whitespace().collect();
-    Ok(Statement::RemoveFilesWildcard(RemoveFilesWildcardCmd { span, dir: (*parts.first().unwrap_or(&"")).into(), pattern: (*parts.get(1).unwrap_or(&"")).into(), timeout: parts.get(2).map(|s| s.to_string()) }))
+    Ok(Statement::RemoveFilesWildcard(RemoveFilesWildcardCmd { span, dir: strip_quotes(parts.first().unwrap_or(&"")).into(), pattern: (*parts.get(1).unwrap_or(&"")).into(), timeout: parts.get(2).map(|s| s.to_string()) }))
 }
 
 fn parse_copy_file(args: &str, span: Span) -> Result<Statement, ParseError> {
     let parts: Vec<&str> = args.split_whitespace().collect();
-    Ok(Statement::CopyFile(CopyFileCmd { span, source: (*parts.first().unwrap_or(&"")).into(), dest: (*parts.get(1).unwrap_or(&"")).into(), retry: parts.get(2).map(|s| s.to_string()) }))
+    Ok(Statement::CopyFile(CopyFileCmd { span, source: strip_quotes(parts.first().unwrap_or(&"")).into(), dest: strip_quotes(parts.get(1).unwrap_or(&"")).into(), retry: parts.get(2).map(|s| s.to_string()) }))
 }
 
 fn parse_move_file(args: &str, span: Span) -> Result<Statement, ParseError> {
     let parts: Vec<&str> = args.split_whitespace().collect();
-    Ok(Statement::MoveFile(MoveFileCmd { span, source: (*parts.first().unwrap_or(&"")).into(), dest: (*parts.get(1).unwrap_or(&"")).into(), timeout: parts.get(2).map(|s| s.to_string()) }))
+    Ok(Statement::MoveFile(MoveFileCmd { span, source: strip_quotes(parts.first().unwrap_or(&"")).into(), dest: strip_quotes(parts.get(1).unwrap_or(&"")).into(), timeout: parts.get(2).map(|s| s.to_string()) }))
 }
 
 fn parse_chmod(args: &str, span: Span) -> Result<Statement, ParseError> {
     let parts: Vec<&str> = args.split_whitespace().collect();
-    Ok(Statement::Chmod(ChmodCmd { span, mode: parts.first().unwrap_or(&"").to_string(), file: (*parts.get(1).unwrap_or(&"")).into() }))
+    Ok(Statement::Chmod(ChmodCmd { span, mode: parts.first().unwrap_or(&"").to_string(), file: strip_quotes(parts.get(1).unwrap_or(&"")).into() }))
 }
 
 fn parse_diff_files(args: &str, span: Span) -> Result<Statement, ParseError> {
     let parts: Vec<&str> = args.split_whitespace().collect();
-    Ok(Statement::DiffFiles(DiffFilesCmd { span, file1: (*parts.first().unwrap_or(&"")).into(), file2: (*parts.get(1).unwrap_or(&"")).into() }))
+    Ok(Statement::DiffFiles(DiffFilesCmd { span, file1: strip_quotes(parts.first().unwrap_or(&"")).into(), file2: strip_quotes(parts.get(1).unwrap_or(&"")).into() }))
 }
 
 fn parse_list_files(args: &str, span: Span) -> Result<Statement, ParseError> {
     let parts: Vec<&str> = args.split_whitespace().collect();
-    Ok(Statement::ListFiles(ListFilesCmd { span, dir: parts.first().map(|s| s.trim().into()), pattern: parts.get(1).map(|s| s.trim().into()) }))
+    Ok(Statement::ListFiles(ListFilesCmd { span, dir: parts.first().map(|s| strip_quotes(s).into()), pattern: parts.get(1).map(|s| s.trim().into()) }))
 }
 
 fn parse_copy_files_wildcard(args: &str, span: Span) -> Result<Statement, ParseError> {
     let parts: Vec<&str> = args.split_whitespace().collect();
-    Ok(Statement::CopyFilesWildcard(CopyFilesWildcardCmd { span, source: (*parts.first().unwrap_or(&"")).into(), dest: (*parts.get(1).unwrap_or(&"")).into(), retry: parts.get(2).map(|s| s.to_string()) }))
+    Ok(Statement::CopyFilesWildcard(CopyFilesWildcardCmd { span, source: strip_quotes(parts.first().unwrap_or(&"")).into(), dest: strip_quotes(parts.get(1).unwrap_or(&"")).into(), retry: parts.get(2).map(|s| s.to_string()) }))
 }
