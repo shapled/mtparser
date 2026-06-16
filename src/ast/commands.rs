@@ -19,9 +19,9 @@
 //! - **Toggles**: ToggleCmd (disable_warnings, enable_query_log, etc.)
 //! - **Misc**: SleepCmd, ExecCmd, ExecwCmd, ExecInBackgroundCmd, DelimiterCmd, AssertCmd, CharacterSetCmd, SystemCmd, RealSleepCmd, RequireCmd, SyncSlaveWithMasterCmd, EndCmd
 
+use crate::ast::Span;
 use crate::ast::expr::{Expr, QueryExpr};
 use crate::ast::text::InterpolatedText;
-use crate::ast::Span;
 
 /// `--echo text` or `echo text;`
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,11 +297,18 @@ pub enum ToggleKind {
     ConnectLog,
     SessionTrackInfo,
     Testcase,
+    AbortOnError,
     // 5.7 only
     Parsing,
     AsyncClient,
     // MariaDB only
     PrepareWarnings,
+    CursorProtocol,
+    NonBlockingApi,
+    Ps2Protocol,
+    ServiceConnection,
+    ViewProtocol,
+    ColumnNames,
 }
 
 /// `--delimiter new_delimiter` or `delimiter new_delimiter;`
@@ -504,3 +511,143 @@ pub struct CopyFilesWildcardCmd {
     pub retry: Option<String>,
 }
 
+// --- Additional commands ---
+
+/// `--query_vertical [SQL]`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryVerticalCmd {
+    pub span: Span,
+    pub sql: InterpolatedText,
+}
+
+/// `--result_format N`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultFormatCmd {
+    pub span: Span,
+    pub version: String,
+}
+
+/// `--query_attributes name value`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryAttributesCmd {
+    pub span: Span,
+    pub attributes: InterpolatedText,
+}
+
+/// `--list_files_write_file file [dir_pattern]`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListFilesWriteFileCmd {
+    pub span: Span,
+    pub file: InterpolatedText,
+    pub dir_pattern: InterpolatedText,
+}
+
+/// `--list_files_append_file file [dir_pattern]`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListFilesAppendFileCmd {
+    pub span: Span,
+    pub file: InterpolatedText,
+    pub dir_pattern: InterpolatedText,
+}
+
+/// `--force-rmdir dir`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForceRmdirCmd {
+    pub span: Span,
+    pub dir: InterpolatedText,
+}
+
+/// `--force-cpdir from_dir to_dir`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForceCpdirCmd {
+    pub span: Span,
+    pub source: InterpolatedText,
+    pub dest: InterpolatedText,
+}
+
+/// `--save_master_pos` — no args
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveMasterPosCmd {
+    pub span: Span,
+}
+
+/// `--sync_with_master [offset]` — alias for sync_slave_with_master
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncWithMasterCmd {
+    pub span: Span,
+    pub offset: Option<String>,
+}
+
+/// `--wait_for_slave_to_stop`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitForSlaveToStopCmd {
+    pub span: Span,
+}
+
+/// `--skip_if_hypergraph [message]`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkipIfHypergraphCmd {
+    pub span: Span,
+    pub message: Option<InterpolatedText>,
+}
+
+/// `--evalp SQL` — MariaDB only, execute prepared statement
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalPCmd {
+    pub span: Span,
+    pub sql: InterpolatedText,
+}
+
+/// `--write_line text file`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteLineCmd {
+    pub span: Span,
+    pub text: InterpolatedText,
+    pub file: InterpolatedText,
+}
+
+/// `--dirty_close`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirtyCloseCmd {
+    pub span: Span,
+}
+
+/// `--ping`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PingCmd {
+    pub span: Span,
+}
+
+// --- MariaDB Prepared Statement commands ---
+
+/// `--PS_prepare stmt` (MariaDB Galera)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsPrepareCmd {
+    pub span: Span,
+    pub sql: InterpolatedText,
+}
+
+/// `--PS_bind name` (MariaDB Galera)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsBindCmd {
+    pub span: Span,
+    pub name: InterpolatedText,
+}
+
+/// `--PS_execute` (MariaDB Galera)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsExecuteCmd {
+    pub span: Span,
+}
+
+/// `--PS_close` (MariaDB Galera)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsCloseCmd {
+    pub span: Span,
+}
+
+/// `--optimizer_trace` (MariaDB)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptimizerTraceCmd {
+    pub span: Span,
+}

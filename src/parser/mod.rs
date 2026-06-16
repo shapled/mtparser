@@ -1,7 +1,7 @@
 //! Core parsing engine using winnow combinators.
 //!
 //! Entry points:
-//! - [`parse`] — parse a string into a [`TestFile`]
+//! - [`parse`] — parse a string into a [`MTFile`]
 //! - [`parse_bytes`] — parse raw bytes (UTF-8 lossy conversion)
 //!
 //! The parser operates line-by-line with winnow combinators for token-level
@@ -11,12 +11,12 @@
 pub mod command;
 pub mod flow;
 
-use winnow::token::{take_till, take_while};
 use winnow::Parser;
+use winnow::token::{take_till, take_while};
 
+use crate::ast::MTFile;
 use crate::ast::span::Span;
 use crate::ast::statement::*;
-use crate::ast::TestFile;
 use crate::error::ParseError;
 use crate::version::MysqlVersion;
 
@@ -63,33 +63,40 @@ impl ParseContext {
 }
 
 /// Parse a complete test file into an AST.
-pub fn parse_bytes(input: &[u8], config: ParserConfig) -> Result<TestFile, ParseError> {
+pub fn parse_bytes(input: &[u8], config: ParserConfig) -> Result<MTFile, ParseError> {
     let text = String::from_utf8_lossy(input);
     parse(&text, config)
 }
 
 /// Parse a complete test file into an AST.
-pub fn parse(input: &str, config: ParserConfig) -> Result<TestFile, ParseError> {
+pub fn parse(input: &str, config: ParserConfig) -> Result<MTFile, ParseError> {
     let mut ctx = ParseContext::new(config);
     let (statements, _pos, _ln) = parse_statements(&mut ctx, input, 0, 1)?;
-    Ok(TestFile::new(statements))
+    Ok(MTFile::new(statements))
 }
 
 /// Read one line using winnow's `take_till` combinator.
+/// Returns (line_content, remaining_input).
 fn read_line(input: &str) -> (&str, &str) {
-    let mut stream = input;
-    let line = take_till::<_, _, ()>(1.., ('\r', '\n'))
-        .parse_next(&mut stream)
-        .unwrap_or("");
+    let mut stream: &str = input;
+    let line = parse_line_inner(&mut stream).unwrap_or("");
     (line, stream)
+}
+
+/// Winnow parser: consume until `\r` or `\n`.
+fn parse_line_inner<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str> {
+    take_till(1.., ['\r', '\n']).parse_next(input)
 }
 
 /// Extract an identifier (alphanumeric + underscore) using winnow's `take_while` combinator.
 fn parse_identifier(s: &str) -> &str {
-    let mut stream = s;
-    take_while::<_, _, ()>(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_'))
-        .parse_next(&mut stream)
-        .unwrap_or("")
+    let mut stream: &str = s;
+    parse_identifier_inner(&mut stream).unwrap_or("")
+}
+
+/// Winnow parser: consume identifier characters (including hyphens for commands like force-rmdir).
+fn parse_identifier_inner<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str> {
+    take_while(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_', '-')).parse_next(input)
 }
 
 /// Parse a sequence of statements from input starting at pos.
@@ -110,7 +117,11 @@ fn parse_statements(
         }
 
         let line_end = remaining.find('\n').unwrap_or(remaining.len());
-        let line_len = if line_end < remaining.len() { line_end + 1 } else { line_end };
+        let line_len = if line_end < remaining.len() {
+            line_end + 1
+        } else {
+            line_end
+        };
         let trimmed = remaining[..line_end].trim();
         let leading_spaces = remaining.len() - trimmed.len();
         ctx.column = (leading_spaces + 1) as u32;
@@ -127,6 +138,10 @@ fn parse_statements(
             }));
         } else if let Some(rest) = trimmed.strip_prefix("--") {
             let rest = rest.trim_start();
+            // `-- }` is a valid closing brace for if/while blocks
+            if rest == "}" {
+                break;
+            }
             let first_word = parse_identifier(rest);
 
             match first_word.to_ascii_lowercase().as_str() {
@@ -141,8 +156,14 @@ fn parse_statements(
                 }
                 "while" => {
                     let condition_text = rest[first_word.len()..].trim();
-                    let (block, new_pos, new_ln) =
-                        parse_while_block(ctx, condition_text, input, pos + line_len, line_num, span)?;
+                    let (block, new_pos, new_ln) = parse_while_block(
+                        ctx,
+                        condition_text,
+                        input,
+                        pos + line_len,
+                        line_num,
+                        span,
+                    )?;
                     statements.push(Statement::While(block));
                     pos = new_pos;
                     line_num = new_ln;
@@ -168,7 +189,11 @@ fn parse_statements(
                 }
                 "perl" => {
                     let arg_text = rest[first_word.len()..].trim();
-                    let end_marker = if arg_text.is_empty() { "EOF".to_string() } else { arg_text.to_string() };
+                    let end_marker = if arg_text.is_empty() {
+                        "EOF".to_string()
+                    } else {
+                        arg_text.to_string()
+                    };
                     let (block, new_pos, new_ln) =
                         parse_perl_block(&end_marker, input, pos + line_len, line_num, span)?;
                     statements.push(Statement::Perl(block));
@@ -219,7 +244,8 @@ fn parse_statements(
                     let leading = line_end - trimmed.len();
                     let cond_start = pos + leading + first_word.len();
                     let (stmt, new_pos, new_ln) = parse_bare_flow_block(
-                        ctx, input, pos, line_len, line_num, cond_start, span, false)?;
+                        ctx, input, pos, line_len, line_num, cond_start, span, false,
+                    )?;
                     statements.push(stmt);
                     pos = new_pos;
                     line_num = new_ln;
@@ -229,7 +255,8 @@ fn parse_statements(
                     let leading = line_end - trimmed.len();
                     let cond_start = pos + leading + first_word.len();
                     let (stmt, new_pos, new_ln) = parse_bare_flow_block(
-                        ctx, input, pos, line_len, line_num, cond_start, span, true)?;
+                        ctx, input, pos, line_len, line_num, cond_start, span, true,
+                    )?;
                     statements.push(stmt);
                     pos = new_pos;
                     line_num = new_ln;
@@ -238,7 +265,11 @@ fn parse_statements(
                 "perl" => {
                     let rest = trimmed[first_word.len()..].trim();
                     let arg = rest.strip_suffix(&ctx.delimiter).unwrap_or(rest).trim();
-                    let end_marker = if arg.is_empty() { "EOF".to_string() } else { arg.to_string() };
+                    let end_marker = if arg.is_empty() {
+                        "EOF".to_string()
+                    } else {
+                        arg.to_string()
+                    };
                     let (block, new_pos, new_ln) =
                         parse_perl_block(&end_marker, input, pos + line_len, line_num, span)?;
                     statements.push(Statement::Perl(block));
@@ -247,7 +278,8 @@ fn parse_statements(
                     continue;
                 }
                 _ => {
-                    let (stmt, consumed) = parse_delimiter_terminated(ctx, input, pos, line_num, span)?;
+                    let (stmt, consumed) =
+                        parse_delimiter_terminated(ctx, input, pos, line_num, span)?;
                     statements.push(stmt);
                     pos += consumed;
                     line_num += input[pos - consumed..pos].matches('\n').count() as u32;
@@ -274,35 +306,129 @@ pub(crate) enum CommandKind {
 pub(crate) fn classify_command(word: &str) -> CommandKind {
     let lower = word.to_ascii_lowercase();
     match lower.as_str() {
-        "echo" | "let" | "error" | "source" | "skip" | "die" | "exit"
-        | "exec" | "execw" | "exec_in_background" | "sleep" | "inc" | "dec"
-        | "assert" | "expr" | "connect" | "connection" | "disconnect"
-        | "change_user" | "reset_connection" | "query" | "eval" | "send"
-        | "send_eval" | "reap" | "horizontal_results" | "vertical_results"
-        | "replace_result" | "replace_column" | "replace_regex" | "sorted_result"
-        | "partially_sorted_result" | "replace_numeric_round" | "delimiter"
-        | "write_file" | "append_file" | "remove_file" | "remove_files_wildcard"
-        | "copy_file" | "move_file" | "mkdir" | "rmdir" | "chmod"
-        | "diff_files" | "file_exists" | "cat_file" | "list_files"
-        | "shutdown_server" | "send_quit" | "send_shutdown"
-        | "if" | "while" | "end" | "perl" | "character_set" | "system"
-        | "real_sleep" | "require" | "lowercase_result"
-        | "sync_slave_with_master" | "copy_files_wildcard"
-        | "disable_warnings" | "enable_warnings"
-        | "disable_query_log" | "enable_query_log"
-        | "disable_result_log" | "enable_result_log"
-        | "disable_info" | "enable_info"
-        | "disable_metadata" | "enable_metadata"
-        | "disable_ps_protocol" | "enable_ps_protocol"
-        | "disable_reconnect" | "enable_reconnect"
-        | "disable_connect_log" | "enable_connect_log"
-        | "disable_session_track_info" | "enable_session_track_info"
-        | "disable_testcase" | "enable_testcase"
-        | "disable_parsing" | "enable_parsing"
-        | "disable_async_client" | "enable_async_client"
-        | "disable_prepare_warnings" | "enable_prepare_warnings" => {
-            CommandKind::Known(lower)
-        }
+        "echo"
+        | "let"
+        | "error"
+        | "source"
+        | "skip"
+        | "die"
+        | "exit"
+        | "exec"
+        | "execw"
+        | "exec_in_background"
+        | "sleep"
+        | "inc"
+        | "dec"
+        | "assert"
+        | "expr"
+        | "connect"
+        | "connection"
+        | "disconnect"
+        | "change_user"
+        | "reset_connection"
+        | "query"
+        | "eval"
+        | "send"
+        | "send_eval"
+        | "reap"
+        | "output"
+        | "horizontal_results"
+        | "query_horizontal"
+        | "vertical_results"
+        | "replace_result"
+        | "replace_column"
+        | "replace_regex"
+        | "sorted_result"
+        | "partially_sorted_result"
+        | "replace_numeric_round"
+        | "delimiter"
+        | "write_file"
+        | "append_file"
+        | "remove_file"
+        | "remove_files_wildcard"
+        | "copy_file"
+        | "move_file"
+        | "mkdir"
+        | "rmdir"
+        | "chmod"
+        | "diff_files"
+        | "file_exists"
+        | "cat_file"
+        | "list_files"
+        | "shutdown_server"
+        | "send_quit"
+        | "send_shutdown"
+        | "if"
+        | "while"
+        | "end"
+        | "perl"
+        | "character_set"
+        | "system"
+        | "real_sleep"
+        | "require"
+        | "lowercase_result"
+        | "sync_slave_with_master"
+        | "copy_files_wildcard"
+        | "query_vertical"
+        | "result_format"
+        | "query_attributes"
+        | "list_files_write_file"
+        | "list_files_append_file"
+        | "force-rmdir"
+        | "force-cpdir"
+        | "save_master_pos"
+        | "sync_with_master"
+        | "wait_for_slave_to_stop"
+        | "skip_if_hypergraph"
+        | "evalp"
+        | "write_line"
+        | "dirty_close"
+        | "ping"
+        | "disable_warnings"
+        | "enable_warnings"
+        | "disable_query_log"
+        | "enable_query_log"
+        | "disable_result_log"
+        | "enable_result_log"
+        | "disable_info"
+        | "enable_info"
+        | "disable_metadata"
+        | "enable_metadata"
+        | "disable_ps_protocol"
+        | "enable_ps_protocol"
+        | "disable_reconnect"
+        | "enable_reconnect"
+        | "disable_connect_log"
+        | "enable_connect_log"
+        | "disable_session_track_info"
+        | "enable_session_track_info"
+        | "disable_testcase"
+        | "enable_testcase"
+        | "disable_parsing"
+        | "enable_parsing"
+        | "disable_async_client"
+        | "enable_async_client"
+        | "disable_prepare_warnings"
+        | "enable_prepare_warnings"
+        | "disable_abort_on_error"
+        | "enable_abort_on_error"
+        | "disable_cursor_protocol"
+        | "enable_cursor_protocol"
+        | "disable_non_blocking_api"
+        | "enable_non_blocking_api"
+        | "disable_ps2_protocol"
+        | "enable_ps2_protocol"
+        | "disable_service_connection"
+        | "enable_service_connection"
+        | "disable_view_protocol"
+        | "enable_view_protocol"
+        | "disable_column_names"
+        | "enable_column_names"
+        | "ps_prepare"
+        | "ps_bind"
+        | "ps_execute"
+        | "ps_close"
+        | "optimizer_trace" => CommandKind::Known(lower),
         _ => CommandKind::Unknown,
     }
 }
@@ -313,13 +439,13 @@ fn parse_double_dash_command(
     span: Span,
 ) -> Result<Statement, ParseError> {
     let first_word = parse_identifier(rest);
-
     match classify_command(first_word) {
         CommandKind::Known(name) => command::parse_known_command(ctx, &name, rest, span),
-        CommandKind::Unknown => Ok(Statement::Sql(SqlStatement {
+        CommandKind::Unknown => Err(ParseError::UnknownCommand {
+            command: first_word.to_string(),
             span,
-            sql: rest.trim().into(),
-        })),
+            suggestion: None,
+        }),
     }
 }
 
@@ -342,7 +468,15 @@ fn parse_if_block(
     let (body, after_body_pos, after_body_line) =
         parse_statements(ctx, input, open_brace_pos, open_brace_line)?;
     let (end_pos, end_line) = consume_close_brace(input, after_body_pos, after_body_line)?;
-    Ok((IfBlock { span, condition, body }, end_pos, end_line))
+    Ok((
+        IfBlock {
+            span,
+            condition,
+            body,
+        },
+        end_pos,
+        end_line,
+    ))
 }
 
 /// Parse `--while (condition)` followed by `{ body }` across multiple lines.
@@ -364,13 +498,25 @@ fn parse_while_block(
     let (body, after_body_pos, after_body_line) =
         parse_statements(ctx, input, open_brace_pos, open_brace_line)?;
     let (end_pos, end_line) = consume_close_brace(input, after_body_pos, after_body_line)?;
-    Ok((WhileBlock { span, condition, body }, end_pos, end_line))
+    Ok((
+        WhileBlock {
+            span,
+            condition,
+            body,
+        },
+        end_pos,
+        end_line,
+    ))
 }
 
 /// Find the opening `{` brace for an if/while block.
 /// Handles `{` alone on a line or `{` with content after it.
 /// Returns `(body_start_pos, body_line_num)`.
-fn find_open_brace(input: &str, start_pos: usize, mut line_num: u32) -> Result<(usize, u32), ParseError> {
+fn find_open_brace(
+    input: &str,
+    start_pos: usize,
+    mut line_num: u32,
+) -> Result<(usize, u32), ParseError> {
     let mut pos = start_pos;
     let start_line = line_num;
     loop {
@@ -382,7 +528,11 @@ fn find_open_brace(input: &str, start_pos: usize, mut line_num: u32) -> Result<(
         }
         let (line, _) = read_line(&input[pos..]);
         let line_end = input[pos..].find('\n').unwrap_or(input[pos..].len());
-        let line_len = if line_end < input[pos..].len() { line_end + 1 } else { line_end };
+        let line_len = if line_end < input[pos..].len() {
+            line_end + 1
+        } else {
+            line_end
+        };
         let trimmed = line.trim();
         if trimmed.starts_with('{') {
             let brace_leading = line.len() - trimmed.len();
@@ -413,10 +563,12 @@ fn scan_bare_block_brace(
     let search = &input[condition_start..];
     let brace_offset = match search.find('{') {
         Some(p) => p,
-        None => return Err(ParseError::UnterminatedFlowControl {
-            kind: "if/while".to_string(),
-            span: Span::new(first_line_num, 1, condition_start, search.len()),
-        }),
+        None => {
+            return Err(ParseError::UnterminatedFlowControl {
+                kind: "if/while".to_string(),
+                span: Span::new(first_line_num, 1, condition_start, search.len()),
+            });
+        }
     };
     let condition_text = search[..brace_offset].trim().to_string();
     let mut body_start = condition_start + brace_offset + 1;
@@ -424,7 +576,8 @@ fn scan_bare_block_brace(
     if body_start < input.len() && input.as_bytes()[body_start] == b'\n' {
         body_start += 1;
     }
-    let body_line = first_line_num + input[condition_start..body_start].matches('\n').count() as u32;
+    let body_line =
+        first_line_num + input[condition_start..body_start].matches('\n').count() as u32;
     Ok((condition_text, body_start, body_line))
 }
 
@@ -444,7 +597,9 @@ fn parse_bare_flow_block(
         scan_bare_block_brace(input, cond_start, line_num)?;
 
     // Check for inline block: `if (cond) { body; }` all on one line
-    let same_line_end = input[body_start..].find('\n').unwrap_or(input.len() - body_start);
+    let same_line_end = input[body_start..]
+        .find('\n')
+        .unwrap_or(input.len() - body_start);
     if same_line_end > 0 {
         let same_line = &input[body_start..body_start + same_line_end];
         if let Some(close_pos) = same_line.rfind('}') {
@@ -456,13 +611,24 @@ fn parse_bare_flow_block(
                 let body_span = Span::new(line_num, 1, body_start, same_line_end);
                 match parse_command_body(ctx, body_text, body_span) {
                     Ok(stmt) => vec![stmt],
-                    Err(_) => vec![Statement::Sql(SqlStatement { span: body_span, sql: body_text.into() })],
+                    Err(_) => vec![Statement::Sql(SqlStatement {
+                        span: body_span,
+                        sql: body_text.into(),
+                    })],
                 }
             };
             let stmt = if is_while {
-                Statement::While(WhileBlock { span, condition, body: body_stmts })
+                Statement::While(WhileBlock {
+                    span,
+                    condition,
+                    body: body_stmts,
+                })
             } else {
-                Statement::If(IfBlock { span, condition, body: body_stmts })
+                Statement::If(IfBlock {
+                    span,
+                    condition,
+                    body: body_stmts,
+                })
             };
             return Ok((stmt, pos + line_len, line_num + 1));
         }
@@ -474,15 +640,27 @@ fn parse_bare_flow_block(
         parse_statements(ctx, input, body_start, body_line)?;
     let (end_pos, end_line) = consume_close_brace(input, after_body_pos, after_body_line)?;
     let stmt = if is_while {
-        Statement::While(WhileBlock { span, condition, body })
+        Statement::While(WhileBlock {
+            span,
+            condition,
+            body,
+        })
     } else {
-        Statement::If(IfBlock { span, condition, body })
+        Statement::If(IfBlock {
+            span,
+            condition,
+            body,
+        })
     };
     Ok((stmt, end_pos, end_line))
 }
 
 /// Consume the closing `}` and return position after it.
-fn consume_close_brace(input: &str, mut pos: usize, mut line_num: u32) -> Result<(usize, u32), ParseError> {
+fn consume_close_brace(
+    input: &str,
+    mut pos: usize,
+    mut line_num: u32,
+) -> Result<(usize, u32), ParseError> {
     if pos < input.len() && input.as_bytes()[pos] == b'}' {
         pos += 1;
         if pos < input.len() && input.as_bytes()[pos] == b'\n' {
@@ -502,10 +680,18 @@ fn parse_write_file_block(
     span: Span,
 ) -> Result<(Statement, usize, u32), ParseError> {
     let (filename, end_marker) = parse_file_args(args)?;
-    let (content, new_pos, new_ln) = read_until_end_marker(&end_marker, input, after_first_line, start_line)?;
-    Ok((Statement::WriteFile(crate::ast::commands::WriteFileCmd {
-        span, filename: filename.into(), end_marker, content: content.into(),
-    }), new_pos, new_ln))
+    let (content, new_pos, new_ln) =
+        read_until_end_marker(&end_marker, input, after_first_line, start_line)?;
+    Ok((
+        Statement::WriteFile(crate::ast::commands::WriteFileCmd {
+            span,
+            filename: filename.into(),
+            end_marker,
+            content: content.into(),
+        }),
+        new_pos,
+        new_ln,
+    ))
 }
 
 /// Parse `--append_file filename END_MARKER ... END_MARKER`.
@@ -517,10 +703,18 @@ fn parse_append_file_block(
     span: Span,
 ) -> Result<(Statement, usize, u32), ParseError> {
     let (filename, end_marker) = parse_file_args(args)?;
-    let (content, new_pos, new_ln) = read_until_end_marker(&end_marker, input, after_first_line, start_line)?;
-    Ok((Statement::AppendFile(crate::ast::commands::AppendFileCmd {
-        span, filename: filename.into(), end_marker, content: content.into(),
-    }), new_pos, new_ln))
+    let (content, new_pos, new_ln) =
+        read_until_end_marker(&end_marker, input, after_first_line, start_line)?;
+    Ok((
+        Statement::AppendFile(crate::ast::commands::AppendFileCmd {
+            span,
+            filename: filename.into(),
+            end_marker,
+            content: content.into(),
+        }),
+        new_pos,
+        new_ln,
+    ))
 }
 
 /// Parse `--perl [delimiter] ... END_PERL`.
@@ -531,8 +725,17 @@ fn parse_perl_block(
     start_line: u32,
     span: Span,
 ) -> Result<(PerlBlock, usize, u32), ParseError> {
-    let (content, new_pos, new_ln) = read_until_end_marker(end_marker, input, after_first_line, start_line)?;
-    Ok((PerlBlock { span, end_marker: end_marker.to_string(), content: content.into() }, new_pos, new_ln))
+    let (content, new_pos, new_ln) =
+        read_until_end_marker(end_marker, input, after_first_line, start_line)?;
+    Ok((
+        PerlBlock {
+            span,
+            end_marker: end_marker.to_string(),
+            content: content.into(),
+        },
+        new_pos,
+        new_ln,
+    ))
 }
 
 /// Strip a trailing delimiter from the argument string, respecting quotes.
@@ -566,23 +769,56 @@ fn strip_trailing_delimiter_quoted<'a>(s: &'a str, delimiter: &str) -> &'a str {
 }
 
 /// Parse filename and END_MARKER from arguments.
+/// Uses winnow `parse_quoted_arg` for quote-wrapped filenames.
 fn parse_file_args(args: &str) -> Result<(String, String), ParseError> {
-    let trimmed = args.trim();
-    let unquoted = command::strip_quotes(trimmed);
-    // If strip_quotes actually removed outer quotes, the entire content is the filename
-    // (the filename may contain spaces). Only split on space if no quotes were stripped.
-    let (filename, end_marker) = if unquoted.len() < trimmed.len() {
-        (unquoted.trim().to_string(), "EOF".to_string())
+    let mut stream: &str = args.trim();
+
+    // Try quoted form: "filename" or 'filename' or `filename`
+    if let Ok(content) = command::parse_quoted_arg(&mut stream) {
+        let rest = stream.trim();
+        let end_marker = if rest.is_empty() {
+            "EOF".to_string()
+        } else {
+            rest.to_string()
+        };
+        if content.trim().is_empty() {
+            return Err(ParseError::Syntax {
+                message: "filename must not be empty".to_string(),
+                span: Span::dummy(),
+            });
+        }
+        return Ok((content.trim().to_string(), end_marker));
+    }
+
+    // Unquoted form: filename [end_marker]
+    let filename = parse_filename_part(args.trim());
+    let rest = args.trim();
+    let after_name = &rest[filename.len()..].trim_start();
+    let end_marker = if after_name.is_empty() {
+        "EOF".to_string()
     } else {
-        let parts: Vec<&str> = unquoted.splitn(2, ' ').collect();
-        let fname = parts[0].trim().to_string();
-        let marker = parts.get(1).map(|s| s.trim().to_string()).unwrap_or_else(|| "EOF".to_string());
-        (fname, marker)
+        after_name.to_string()
     };
     if filename.is_empty() {
-        return Err(ParseError::Syntax { message: "filename must not be empty".to_string(), span: Span::dummy() });
+        return Err(ParseError::Syntax {
+            message: "filename must not be empty".to_string(),
+            span: Span::dummy(),
+        });
     }
     Ok((filename, end_marker))
+}
+
+/// Extract the filename part (until whitespace) using winnow `take_till`.
+fn parse_filename_part(input: &str) -> String {
+    let mut stream: &str = input;
+    parse_filename_part_inner(&mut stream)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Winnow parser: consume filename characters (non-whitespace).
+fn parse_filename_part_inner<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str> {
+    take_till(1.., [' ', '\t', '\n', '\r']).parse_next(input)
 }
 
 /// Read lines until we find a line that exactly matches the end_marker.
@@ -604,14 +840,20 @@ fn read_until_end_marker(
         }
         let (line, _) = read_line(&input[pos..]);
         let line_end = input[pos..].find('\n').unwrap_or(input[pos..].len());
-        let line_len = if line_end < input[pos..].len() { line_end + 1 } else { line_end };
+        let line_len = if line_end < input[pos..].len() {
+            line_end + 1
+        } else {
+            line_end
+        };
 
         if line.trim() == end_marker {
             pos += line_len;
             line_num += 1;
             return Ok((content, pos, line_num));
         }
-        if !content.is_empty() { content.push('\n'); }
+        if !content.is_empty() {
+            content.push('\n');
+        }
         content.push_str(line);
         pos += line_len;
         line_num += 1;
@@ -631,7 +873,11 @@ fn parse_delimiter_terminated(
     loop {
         let (line, _) = read_line(&input[pos..]);
         let line_end = input[pos..].find('\n').unwrap_or(input[pos..].len());
-        let line_len = if line_end < input[pos..].len() { line_end + 1 } else { line_end };
+        let line_len = if line_end < input[pos..].len() {
+            line_end + 1
+        } else {
+            line_end
+        };
         let trimmed = line.trim_end();
 
         if let Some(delim_idx) = trimmed.rfind(&ctx.delimiter) {
@@ -639,7 +885,9 @@ fn parse_delimiter_terminated(
             let after_delim = &trimmed[delim_idx + ctx.delimiter.len()..];
             let after = after_delim.trim();
             if after.is_empty() || after.starts_with('#') {
-                if !body.is_empty() { body.push('\n'); }
+                if !body.is_empty() {
+                    body.push('\n');
+                }
                 body.push_str(before_delim);
                 let span = Span::new(start_line, 1, start_pos, pos + line_len - start_pos);
                 let stmt = parse_command_body(ctx, &body, span)?;
@@ -647,14 +895,22 @@ fn parse_delimiter_terminated(
             }
         }
 
-        if !body.is_empty() { body.push('\n'); }
+        if !body.is_empty() {
+            body.push('\n');
+        }
         body.push_str(line);
         pos += line_len;
 
         if pos >= input.len() {
             let total_len = pos - start_pos;
             let span = Span::new(start_line, 1, start_pos, total_len);
-            return Ok((Statement::Sql(SqlStatement { span, sql: body.trim().into() }), total_len));
+            return Ok((
+                Statement::Sql(SqlStatement {
+                    span,
+                    sql: body.trim().into(),
+                }),
+                total_len,
+            ));
         }
     }
 }
@@ -668,6 +924,9 @@ fn parse_command_body(
     let first_word = parse_identifier(body.trim());
     match classify_command(first_word) {
         CommandKind::Known(name) => command::parse_known_command(ctx, &name, body.trim(), span),
-        CommandKind::Unknown => Ok(Statement::Sql(SqlStatement { span, sql: body.into() })),
+        CommandKind::Unknown => Ok(Statement::Sql(SqlStatement {
+            span,
+            sql: body.into(),
+        })),
     }
 }

@@ -1,8 +1,8 @@
-use winnow::combinator::{dispatch, fail};
-use winnow::token::{take, take_while};
+use winnow::combinator::alt;
+use winnow::token::{take_till, take_while};
 use winnow::Parser;
 
-use crate::ast::expr::{ComparisonOp, ComparisonRhs, Expr, MariaDBExpr, QueryExpr, VariableRef};
+use crate::ast::expr::{ComparisonOp, ComparisonRhs, Expr, QueryExpr, VariableRef};
 use crate::ast::Span;
 use crate::error::ParseError;
 use crate::version::MysqlVersion;
@@ -10,7 +10,8 @@ use crate::version::MysqlVersion;
 /// Parse a condition expression from an if/while/assert command.
 /// Input is the text after the command name, e.g., `($var == "value")` or `($var)`.
 pub(crate) fn parse_condition(input: &str, version: MysqlVersion) -> Result<Expr, ParseError> {
-    // Extract content inside parentheses if present
+    // Extract content inside parentheses if present.
+    // Uses rfind(')') to correctly handle nested parens.
     let inner = if let Some(rest) = input.trim().strip_prefix('(') {
         if let Some(pos) = rest.rfind(')') {
             rest[..pos].trim()
@@ -44,10 +45,7 @@ fn parse_variable(s: &str) -> Option<VariableRef> {
     let Some(rest) = s.strip_prefix('$') else {
         return None;
     };
-    let mut stream = rest;
-    let name = take_while::<_, _, ()>(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_', '-'))
-        .parse_next(&mut stream)
-        .unwrap_or("");
+    let name = parse_var_name(rest);
     if !name.is_empty() {
         Some(VariableRef::new(Span::dummy(), name.to_string()))
     } else {
@@ -55,35 +53,52 @@ fn parse_variable(s: &str) -> Option<VariableRef> {
     }
 }
 
-/// Parse a comparison operator using winnow's `dispatch!` for O(1) prefix matching.
+/// Parse a variable name (identifier) from input using winnow take_while.
+fn parse_var_name(input: &str) -> &str {
+    let mut stream: &str = input;
+    parse_var_name_winnow_inner(&mut stream).unwrap_or("")
+}
+
+/// Winnow parser for variable name.
+fn parse_var_name_winnow_inner<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str> {
+    take_while(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_', '-')).parse_next(input)
+}
+
+/// Parse a comparison operator using winnow `alt` combinators.
 fn parse_comparison_op(s: &str) -> Option<ComparisonOp> {
     let trimmed = s.trim();
-    let mut stream = trimmed;
 
-    // Try two-character operators first using dispatch!
-    let result = dispatch!(take::<_, _, ()>(2usize);
-        "==" => |_i: &mut &str| -> Result<ComparisonOp, ()> { Ok(ComparisonOp::Eq) },
-        "!=" => |_i: &mut &str| -> Result<ComparisonOp, ()> { Ok(ComparisonOp::Neq) },
-        "<=" => |_i: &mut &str| -> Result<ComparisonOp, ()> { Ok(ComparisonOp::Le) },
-        ">=" => |_i: &mut &str| -> Result<ComparisonOp, ()> { Ok(ComparisonOp::Ge) },
-        _ => fail::<_, _, ()>,
-    ).parse_next(&mut stream);
-
-    if result.is_ok() {
-        return result.ok();
+    // Two-character operators first (longest match via alt)
+    let mut stream: &str = trimmed;
+    if let Ok(op) = parse_two_char_op(&mut stream) {
+        return Some(op);
     }
 
-    // Try single-character operators: < or > (but not << or >>)
-    let _: Result<&str, ()> = "<".parse_next(&mut stream);
-    if !trimmed.starts_with("<<") && trimmed.starts_with('<') {
-        return Some(ComparisonOp::Lt);
+    // Single-character operators: < or > (but not << or >>)
+    match trimmed.as_bytes() {
+        [b'<', b'<', ..] | [b'>', b'>', ..] => None,
+        [b'<', ..] => Some(ComparisonOp::Lt),
+        [b'>', ..] => Some(ComparisonOp::Gt),
+        _ => None,
     }
-    let _: Result<&str, ()> = ">".parse_next(&mut stream);
-    if !trimmed.starts_with(">>") && trimmed.starts_with('>') {
-        return Some(ComparisonOp::Gt);
-    }
+}
 
-    None
+/// Winnow parser for two-character comparison operators.
+fn parse_two_char_op<'s>(input: &mut &'s str) -> winnow::ModalResult<ComparisonOp> {
+    alt((
+        "==".value(ComparisonOp::Eq),
+        "!=".value(ComparisonOp::Neq),
+        "<=".value(ComparisonOp::Le),
+        ">=".value(ComparisonOp::Ge),
+    )).parse_next(input)
+}
+
+/// Parse a quote-delimited string ("content" or 'content'), returning the content.
+fn parse_quoted_string<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str> {
+    let quote = winnow::token::one_of(['"', '\'']).parse_next(input)?;
+    let content = take_till(0.., [quote]).parse_next(input)?;
+    let _ = winnow::token::one_of([quote]).parse_next(input)?;
+    Ok(content)
 }
 
 impl ComparisonOp {
@@ -99,23 +114,22 @@ impl ComparisonOp {
     }
 }
 
-/// Parse the right-hand side of a comparison expression.
+/// Parse the right-hand side of a comparison expression using winnow `alt`.
 fn parse_rhs(s: &str) -> ComparisonRhs {
     let s = s.trim();
-    let inner = s.trim_matches('"').trim_matches('\'').trim();
 
-    // Try integer
-    if let Ok(n) = inner.parse::<i64>() {
+    // Try integer first (fast path)
+    if let Ok(n) = s.parse::<i64>() {
         return ComparisonRhs::Integer(n);
     }
 
-    // Try variable
-    if let Some(var) = parse_variable(inner) {
+    // Try variable: $name
+    if let Some(var) = parse_variable(s) {
         return ComparisonRhs::Variable(var);
     }
 
-    // Try backtick query
-    if let Some(query) = inner.strip_prefix('`') {
+    // Try backtick query: `SQL`
+    if let Some(query) = s.strip_prefix('`') {
         if let Some(query) = query.strip_suffix('`') {
             return ComparisonRhs::Query(QueryExpr::new(
                 Span::dummy(),
@@ -124,8 +138,14 @@ fn parse_rhs(s: &str) -> ComparisonRhs {
         }
     }
 
-    // String
-    ComparisonRhs::String(inner.to_string())
+    // Try quote-delimited string: "value" or 'value'
+    let mut stream: &str = s;
+    if let Ok(content) = parse_quoted_string(&mut stream) {
+        return ComparisonRhs::String(content.to_string());
+    }
+
+    // Bare string
+    ComparisonRhs::String(s.to_string())
 }
 
 /// Parse a non-negation inner expression.
@@ -136,10 +156,10 @@ fn parse_inner_expr(inner: &str, version: MysqlVersion) -> Result<Expr, ParseErr
             if let Some(rest) = rest.strip_prefix('(') {
                 if let Some(pos) = rest.rfind(')') {
                     let expr = rest[..pos].trim();
-                    return Ok(Expr::MariaDB(MariaDBExpr::new(
-                        Span::dummy(),
-                        expr.to_string(),
-                    )));
+                    return Ok(Expr::MariaDBClosure {
+                        span: Span::dummy(),
+                        expression: expr.to_string(),
+                    });
                 }
             }
         }
@@ -148,10 +168,10 @@ fn parse_inner_expr(inner: &str, version: MysqlVersion) -> Result<Expr, ParseErr
         // e.g. `0 && $have_debug`, `$x || $y`
         for op in ["&&", "||"] {
             if find_logical_op(inner, op).is_some() {
-                return Ok(Expr::MariaDB(MariaDBExpr::new(
-                    Span::dummy(),
-                    inner.to_string(),
-                )));
+                return Ok(Expr::MariaDBLogical {
+                    span: Span::dummy(),
+                    expression: inner.to_string(),
+                });
             }
         }
     }

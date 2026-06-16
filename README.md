@@ -32,23 +32,23 @@ use mtparser::version::MysqlVersion;
 
 // Parse a test file (default: Compatible mode, all MySQL versions)
 let config = ParserConfig::default();
-let test_file = parse(input, config)?;
+let mt_file = parse(input, config)?;
 
 // Parse with MariaDB support (enables $() expressions and && operators)
 let config = ParserConfig::new(MysqlVersion::MariaDB);
-let test_file = parse(input, config)?;
+let mt_file = parse(input, config)?;
 
 // Parse with a specific MySQL version
 let config = ParserConfig::new(MysqlVersion::V80);
-let test_file = parse(input, config)?;
+let mt_file = parse(input, config)?;
 
 // Custom version union
 let config = ParserConfig::new(MysqlVersion::V80 | MysqlVersion::V84);
-let test_file = parse(input, config)?;
+let mt_file = parse(input, config)?;
 
 // Both MySQL and MariaDB
 let config = ParserConfig::new(MysqlVersion::Compatible | MysqlVersion::MariaDB);
-let test_file = parse(input, config)?;
+let mt_file = parse(input, config)?;
 ```
 
 The returned `TestFile` contains a `statements: Vec<Statement>` where each `Statement` is an enum variant representing a command, SQL statement, flow control block, comment, or empty line.

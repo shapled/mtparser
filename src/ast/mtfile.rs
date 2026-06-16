@@ -1,12 +1,12 @@
 use super::Statement;
 
-/// A complete parsed test file (.test or .inc).
+/// Parsed result of a .test or .inc file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TestFile {
+pub struct MTFile {
     pub statements: Vec<Statement>,
 }
 
-impl TestFile {
+impl MTFile {
     pub fn new(statements: Vec<Statement>) -> Self {
         Self { statements }
     }

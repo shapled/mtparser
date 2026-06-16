@@ -1,11 +1,11 @@
+use crate::ast::MTFile;
 use crate::ast::statement::*;
-use crate::ast::TestFile;
 
 use super::VisitResult;
 
 /// Mutable visitor trait for traversing and modifying the AST.
 pub trait MutVisitor {
-    fn visit_test_file_mut(&mut self, file: &mut TestFile) -> VisitResult {
+    fn visit_mt_file_mut(&mut self, file: &mut MTFile) -> VisitResult {
         for stmt in &mut file.statements {
             if self.visit_statement_mut(stmt) == VisitResult::Stop {
                 return VisitResult::Stop;
@@ -52,6 +52,10 @@ pub trait MutVisitor {
         VisitResult::Continue
     }
 
-    fn visit_if_mut(&mut self, _block: &mut IfBlock) -> VisitResult { VisitResult::Continue }
-    fn visit_while_mut(&mut self, _block: &mut WhileBlock) -> VisitResult { VisitResult::Continue }
+    fn visit_if_mut(&mut self, _block: &mut IfBlock) -> VisitResult {
+        VisitResult::Continue
+    }
+    fn visit_while_mut(&mut self, _block: &mut WhileBlock) -> VisitResult {
+        VisitResult::Continue
+    }
 }
