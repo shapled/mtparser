@@ -3,7 +3,7 @@
 //! All command argument parsing is implemented as winnow parser functions
 //! following the signature `fn(&mut &str) -> ModalResult<T>`.
 
-use winnow::combinator::{alt, cut_err, preceded, separated};
+use winnow::combinator::{alt, cut_err, delimited, opt, preceded, separated};
 use winnow::token::{one_of, take_till, take_while};
 use winnow::Parser;
 
@@ -12,15 +12,34 @@ use crate::ast::statement::*;
 use crate::ast::text::InterpolatedText;
 use crate::ast::Span;
 use crate::error::ParseError;
-use crate::parser::Stream;
+use crate::parser::{modal_err_to_parse_err, Stream};
 use crate::version::MysqlVersion;
 
 // ---------------------------------------------------------------------------
-// Shared primitive combinators
+// Shared primitive combinators — reusable across commands with common patterns
 // ---------------------------------------------------------------------------
 
+/// Skip zero or more ASCII whitespace characters (space, tab).
+fn ws<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str> {
+    take_while(0.., [' ', '\t']).parse_next(input)
+}
+
+/// Take the remaining input, trimmed of leading/trailing whitespace. Infallible.
+fn take_rest<'s>(input: &mut &'s str) -> &'s str {
+    let _: winnow::ModalResult<&str> = take_while(0.., [' ', '\t']).parse_next(input);
+    let rest = *input;
+    *input = "";
+    rest.trim_end()
+}
+
+/// Take the remaining input, returning `None` if empty after trimming.
+fn take_rest_opt<'s>(input: &mut &'s str) -> Option<&'s str> {
+    let rest = take_rest(input);
+    if rest.is_empty() { None } else { Some(rest) }
+}
+
 /// Parse a `$variable_name`, returning the variable name without the `$` prefix.
-fn parse_dollar_var<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str> {
+fn dollar_var<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str> {
     preceded(
         '$',
         cut_err(take_while(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_'))),
@@ -31,19 +50,76 @@ fn parse_dollar_var<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str> {
 /// Parse a possibly quote-wrapped argument, returning the inner content.
 /// Quotes recognized: `'`, `"`, `` ` ``.
 pub(crate) fn parse_quoted_arg<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str> {
-    let mut open = one_of(['\'', '"', '`']).parse_next(input)?;
+    let open = one_of(['\'', '"', '`']).parse_next(input)?;
     let content = take_till(1.., [open]).parse_next(input)?;
-    open.parse_next(input)?; // consume closing quote
+    one_of([open]).parse_next(input)?; // consume closing quote
     Ok(content)
 }
 
 /// Parse a single filename token: either a quoted string or non-space text.
-fn parse_filename_token<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str> {
+fn single_token<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str> {
     alt((
         parse_quoted_arg,
         take_till(1.., [' ', '\t']),
     ))
     .parse_next(input)
+}
+
+/// Parse whitespace-separated tokens. Returns all tokens in the input.
+fn ws_tokens<'s>(input: &mut &'s str) -> winnow::ModalResult<Vec<&'s str>> {
+    separated(0.., take_till(1.., [' ', '\t', '\n', '\r']), take_while(1.., [' ', '\t']))
+        .parse_next(input)
+}
+
+/// Parse a comma-separated list of elements, each trimmed of surrounding whitespace.
+fn comma_list<'s, F>(elem: F) -> impl winnow::Parser<&'s str, Vec<&'s str>, winnow::error::ErrMode<winnow::error::ContextError>>
+where
+    F: winnow::Parser<&'s str, &'s str, winnow::error::ErrMode<winnow::error::ContextError>>,
+{
+    separated(
+        0..,
+        delimited(ws, elem, ws),
+        ',',
+    )
+}
+
+/// Parse `name = value` assignment, returning (name, value).
+/// Name extends until `=` or whitespace; optional leading `$` is stripped.
+fn name_eq_value<'s>(input: &mut &'s str) -> winnow::ModalResult<(&'s str, &'s str)> {
+    let _ = ws(input)?;
+    let name = take_till(1.., ['=', ' ', '\t']).parse_next(input)?;
+    let _ = ws(input)?;
+    one_of('=').parse_next(input)?;
+    let value = take_rest(input);
+    Ok((name, value))
+}
+
+/// Chunk whitespace-separated tokens into pairs.
+fn paired_tokens<'s>(input: &mut &'s str) -> winnow::ModalResult<Vec<(&'s str, &'s str)>> {
+    let tokens = ws_tokens(input)?;
+    let pairs: Vec<(&str, &str)> = tokens.chunks_exact(2)
+        .filter_map(|chunk| Some((chunk.first().copied()?, chunk.get(1).copied()?)))
+        .collect();
+    Ok(pairs)
+}
+
+/// Chunk whitespace-separated tokens into triples.
+fn triple_tokens<'s>(input: &mut &'s str) -> winnow::ModalResult<Vec<(&'s str, &'s str, &'s str)>> {
+    let tokens = ws_tokens(input)?;
+    let triples: Vec<(&str, &str, &str)> = tokens.chunks_exact(3)
+        .filter_map(|chunk| Some((chunk.first().copied()?, chunk.get(1).copied()?, chunk.get(2).copied()?)))
+        .collect();
+    Ok(triples)
+}
+
+/// Helper: run a parser on `args`, converting ModalResult to ParseError.
+fn run<'a, P, O>(parser: P, args: &'a str, span: Span, ctx: &str) -> Result<O, ParseError>
+where
+    P: winnow::Parser<&'a str, O, winnow::error::ErrMode<winnow::error::ContextError>>,
+{
+    let mut s = args;
+    let mut parser = parser;
+    parser.parse_next(&mut s).map_err(|e| modal_err_to_parse_err(e, span, ctx))
 }
 
 // ---------------------------------------------------------------------------
@@ -67,49 +143,141 @@ pub(crate) fn parse_known_command(
     }
 
     let args = skip_command_name(name, input);
+    let mut s: &str = args;
 
     match name {
-        "echo" => Ok(Statement::Echo(EchoCmd { span, text: args.trim().into() })),
+        "echo" => Ok(Statement::Echo(EchoCmd { span, text: take_rest(&mut s).into() })),
         "source" => {
-            let mut stream = args.trim();
-            let file = parse_filename_token.parse_next(&mut stream).unwrap_or(args.trim());
+            let _ = ws(&mut s);
+            let file = single_token(&mut s).unwrap_or("");
             Ok(Statement::Source(SourceCmd { span, file: file.into() }))
         }
-        "skip" => Ok(Statement::Skip(SkipCmd { span, message: { let m = args.trim(); if m.is_empty() { None } else { Some(m.into()) } } })),
-        "die" => Ok(Statement::Die(DieCmd { span, message: { let m = args.trim(); if m.is_empty() { None } else { Some(m.into()) } } })),
+        "skip" => Ok(Statement::Skip(SkipCmd { span, message: take_rest_opt(&mut s).map(|m| m.into()) })),
+        "die" => Ok(Statement::Die(DieCmd { span, message: take_rest_opt(&mut s).map(|m| m.into()) })),
         "exit" => Ok(Statement::Exit(ExitCmd { span })),
-        "exec" => Ok(Statement::Exec(ExecCmd { span, command: args.trim().into() })),
-        "execw" => Ok(Statement::Execw(ExecwCmd { span, command: args.trim().into() })),
-        "exec_in_background" => Ok(Statement::ExecInBackground(ExecInBackgroundCmd { span, command: args.trim().into() })),
-        "sleep" => Ok(Statement::Sleep(SleepCmd { span, seconds: args.trim().to_string() })),
+        "exec" => Ok(Statement::Exec(ExecCmd { span, command: take_rest(&mut s).into() })),
+        "execw" => Ok(Statement::Execw(ExecwCmd { span, command: take_rest(&mut s).into() })),
+        "exec_in_background" => Ok(Statement::ExecInBackground(ExecInBackgroundCmd { span, command: take_rest(&mut s).into() })),
+        "sleep" => Ok(Statement::Sleep(SleepCmd { span, seconds: take_rest(&mut s).to_string() })),
         "reap" => Ok(Statement::Reap(ReapCmd { span })),
-        "output" => parse_output_cmd(args, span),
+        "output" => {
+            let file = strip_quotes(take_rest(&mut s));
+            Ok(Statement::Output(OutputCmd { span, file: file.into() }))
+        }
 
-        "let" => parse_let(args, span),
-        "inc" => parse_inc(args, span),
-        "dec" => parse_dec(args, span),
-        "expr" => parse_expr(args, span),
-        "error" => parse_error(args, span),
+        "let" => {
+            let result = name_eq_value(&mut s);
+            let (var, value) = match result {
+                Ok(v) => v,
+                Err(_) => return Err(ParseError::Syntax { message: format!("invalid let syntax: {}", args), span }),
+            };
+            let var = var.strip_prefix('$').unwrap_or(var);
+            if var.is_empty() {
+                return Err(ParseError::Syntax { message: format!("invalid let syntax: {}", args), span });
+            }
+            if let Some(query) = value.strip_prefix('`').and_then(|v| v.strip_suffix('`')) {
+                Ok(Statement::Let(LetCmd {
+                    span,
+                    variable: var.to_string(),
+                    value: LetValue::Query(crate::ast::expr::QueryExpr::new(Span::dummy(), query.to_string())),
+                }))
+            } else {
+                Ok(Statement::Let(LetCmd { span, variable: var.to_string(), value: LetValue::Literal(value.to_string()) }))
+            }
+        }
+        "inc" => {
+            let var = dollar_var(&mut s).unwrap_or("");
+            if var.is_empty() {
+                return Err(ParseError::Syntax { message: "inc requires a variable name ($var)".to_string(), span });
+            }
+            Ok(Statement::Inc(IncCmd { span, variable: var.to_string() }))
+        }
+        "dec" => {
+            let var = dollar_var(&mut s).unwrap_or("");
+            if var.is_empty() {
+                return Err(ParseError::Syntax { message: "dec requires a variable name ($var)".to_string(), span });
+            }
+            Ok(Statement::Dec(DecCmd { span, variable: var.to_string() }))
+        }
+        "expr" => {
+            let var = dollar_var(&mut s).map_err(|e| modal_err_to_parse_err(e, span, "expr"))?;
+            let _: winnow::ModalResult<Option<char>> = opt(one_of('=')).parse_next(&mut s);
+            let expression = take_rest(&mut s).to_string();
+            if expression.is_empty() {
+                return Err(ParseError::Syntax { message: format!("invalid expr syntax: {}", args), span });
+            }
+            Ok(Statement::Expr(ExprCmd { span, variable: var.to_string(), expression }))
+        }
+        "error" => {
+            let elems = run(comma_list(take_till(1.., [','])), args, span, "error")?;
+            let codes: Vec<InterpolatedText> = elems.into_iter().map(Into::into).collect();
+            Ok(Statement::Error(ErrorCmd { span, error_codes: codes }))
+        }
 
-        "connect" => parse_connect(args, span),
-        "connection" => Ok(Statement::Connection(ConnectionCmd { span, name: args.trim().into() })),
-        "disconnect" => Ok(Statement::Disconnect(DisconnectCmd { span, name: args.trim().into() })),
-        "change_user" => parse_change_user(args, span),
+        "connect" => {
+            let _ = ws(&mut s);
+            // Try parenthesized form: (name, host, ...)
+            let paren_result: winnow::ModalResult<Vec<&str>> = delimited(
+                one_of('('),
+                comma_list(take_till(0.., [',', ')'])),
+                one_of(')'),
+            ).parse_next(&mut s);
+            match paren_result {
+                Ok(parts) => {
+                    let name = parts.first().map(|s| (*s).trim().into());
+                    let mut params = ConnectParams::default();
+                    if let Some(h) = parts.get(1) { params.host = Some(h.trim().into()); }
+                    if let Some(u) = parts.get(2) { params.user = Some(u.trim().into()); }
+                    if let Some(p) = parts.get(3) { params.password = Some(p.trim().into()); }
+                    if let Some(d) = parts.get(4) { params.database = Some(d.trim().into()); }
+                    if let Some(p) = parts.get(5) { params.port = Some(p.trim().into()); }
+                    if let Some(so) = parts.get(6) { params.socket = Some(so.trim().into()); }
+                    Ok(Statement::Connect(ConnectCmd { span, name, params }))
+                }
+                Err(_) => {
+                    let mut s2: &str = args;
+                    let name = take_rest(&mut s2);
+                    Ok(Statement::Connect(ConnectCmd { span, name: Some(name.into()), params: ConnectParams::default() }))
+                }
+            }
+        }
+        "connection" => Ok(Statement::Connection(ConnectionCmd { span, name: take_rest(&mut s).into() })),
+        "disconnect" => Ok(Statement::Disconnect(DisconnectCmd { span, name: take_rest(&mut s).into() })),
+        "change_user" => {
+            let elems = run(comma_list(take_till(1.., [','])), args, span, "change_user")?;
+            let get = |i: usize| elems.get(i).map(|s| (*s).trim()).filter(|s| !s.is_empty()).map(|s| s.into());
+            Ok(Statement::ChangeUser(ChangeUserCmd {
+                span,
+                user: get(0),
+                password: get(1),
+                database: get(2),
+            }))
+        }
         "reset_connection" => Ok(Statement::ResetConnection(ResetConnectionCmd { span })),
 
-        "query" => Ok(Statement::Query(QueryCmd { span, sql: args.trim().into() })),
-        "eval" => Ok(Statement::Eval(EvalCmd { span, sql: args.trim().into() })),
-        "send" => Ok(Statement::Send(SendCmd { span, sql: args.trim().into() })),
-        "send_eval" => Ok(Statement::SendEval(SendEvalCmd { span, sql: args.trim().into() })),
+        "query" => Ok(Statement::Query(QueryCmd { span, sql: take_rest(&mut s).into() })),
+        "eval" => Ok(Statement::Eval(EvalCmd { span, sql: take_rest(&mut s).into() })),
+        "send" => Ok(Statement::Send(SendCmd { span, sql: take_rest(&mut s).into() })),
+        "send_eval" => Ok(Statement::SendEval(SendEvalCmd { span, sql: take_rest(&mut s).into() })),
 
         "horizontal_results" | "query_horizontal" => Ok(Statement::HorizontalResults(HorizontalResultsCmd { span })),
         "vertical_results" => Ok(Statement::VerticalResults(VerticalResultsCmd { span })),
         "sorted_result" => Ok(Statement::SortedResult(SortedResultCmd { span })),
-        "replace_result" => parse_replace_result(args, span),
-        "replace_column" => parse_replace_column(args, span),
+        "replace_result" => {
+            let pairs = run(paired_tokens, args, span, "replace_result")?;
+            let replacements = pairs.into_iter().map(|(a, b)| (a.into(), b.into())).collect();
+            Ok(Statement::ReplaceResult(ReplaceResultCmd { span, replacements }))
+        }
+        "replace_column" => {
+            let triples = run(triple_tokens, args, span, "replace_column")?;
+            let replacements = triples.into_iter().map(|(c, o, n)| ReplaceColumnItem {
+                column: c.to_string(), old_value: o.into(), new_value: n.into(),
+            }).collect();
+            Ok(Statement::ReplaceColumn(ReplaceColumnCmd { span, replacements }))
+        }
         "replace_regex" => parse_replace_regex(stream, args, span),
-        "partially_sorted_result" => Ok(Statement::PartiallySortedResult(PartiallySortedResultCmd { span, columns: args.trim().to_string() })),
-        "replace_numeric_round" => Ok(Statement::ReplaceNumericRound(ReplaceNumericRoundCmd { span, decimals: args.trim().to_string() })),
+        "partially_sorted_result" => Ok(Statement::PartiallySortedResult(PartiallySortedResultCmd { span, columns: take_rest(&mut s).to_string() })),
+        "replace_numeric_round" => Ok(Statement::ReplaceNumericRound(ReplaceNumericRoundCmd { span, decimals: take_rest(&mut s).to_string() })),
 
         "disable_warnings" | "enable_warnings"
         | "disable_query_log" | "enable_query_log"
@@ -136,43 +304,68 @@ pub(crate) fn parse_known_command(
         }
 
         // No-arg commands
-        "query_vertical" => Ok(Statement::QueryVertical(QueryVerticalCmd { span, sql: args.trim().into() })),
+        "query_vertical" => Ok(Statement::QueryVertical(QueryVerticalCmd { span, sql: take_rest(&mut s).into() })),
         "save_master_pos" => Ok(Statement::SaveMasterPos(SaveMasterPosCmd { span })),
         "wait_for_slave_to_stop" => Ok(Statement::WaitForSlaveToStop(WaitForSlaveToStopCmd { span })),
         "dirty_close" => Ok(Statement::DirtyClose(DirtyCloseCmd { span })),
         "ping" => Ok(Statement::Ping(PingCmd { span })),
-        "ps_prepare" => Ok(Statement::PsPrepare(PsPrepareCmd { span, sql: args.trim().into() })),
-        "ps_bind" => Ok(Statement::PsBind(PsBindCmd { span, name: args.trim().into() })),
+        "ps_prepare" => Ok(Statement::PsPrepare(PsPrepareCmd { span, sql: take_rest(&mut s).into() })),
+        "ps_bind" => Ok(Statement::PsBind(PsBindCmd { span, name: take_rest(&mut s).into() })),
         "ps_execute" => Ok(Statement::PsExecute(PsExecuteCmd { span })),
         "ps_close" => Ok(Statement::PsClose(PsCloseCmd { span })),
         "optimizer_trace" => Ok(Statement::OptimizerTrace(OptimizerTraceCmd { span })),
 
         // Commands with arguments
-        "result_format" => Ok(Statement::ResultFormat(ResultFormatCmd { span, version: args.trim().to_string() })),
-        "query_attributes" => Ok(Statement::QueryAttributes(QueryAttributesCmd { span, attributes: args.trim().into() })),
-        "skip_if_hypergraph" => {
-            let msg = args.trim();
-            Ok(Statement::SkipIfHypergraph(SkipIfHypergraphCmd {
-                span,
-                message: if msg.is_empty() { None } else { Some(msg.into()) },
-            }))
-        }
+        "result_format" => Ok(Statement::ResultFormat(ResultFormatCmd { span, version: take_rest(&mut s).to_string() })),
+        "query_attributes" => Ok(Statement::QueryAttributes(QueryAttributesCmd { span, attributes: take_rest(&mut s).into() })),
+        "skip_if_hypergraph" => Ok(Statement::SkipIfHypergraph(SkipIfHypergraphCmd {
+            span,
+            message: take_rest_opt(&mut s).map(|m| m.into()),
+        })),
         "sync_with_master" => Ok(Statement::SyncWithMaster(SyncWithMasterCmd {
             span,
-            offset: { let a = args.trim(); if a.is_empty() { None } else { Some(a.to_string()) } },
+            offset: take_rest_opt(&mut s).map(|a| a.to_string()),
         })),
-        "evalp" => Ok(Statement::EvalP(EvalPCmd { span, sql: args.trim().into() })),
+        "evalp" => Ok(Statement::EvalP(EvalPCmd { span, sql: take_rest(&mut s).into() })),
 
         // File I/O commands
-        "list_files_write_file" => parse_list_files_write_file(args, span),
-        "list_files_append_file" => parse_list_files_append_file(args, span),
-        "force-rmdir" => Ok(Statement::ForceRmdir(ForceRmdirCmd { span, dir: strip_quotes(args.trim()).into() })),
-        "force-cpdir" => parse_force_cpdir(args, span),
-        "force-restart" => Ok(Statement::DirtyClose(DirtyCloseCmd { span })), // treat as no-op
-        "write_line" => parse_write_line(args, span),
+        "list_files_write_file" => {
+            let tokens = run(ws_tokens, args, span, "list_files_write_file")?;
+            Ok(Statement::ListFilesWriteFile(ListFilesWriteFileCmd {
+                span,
+                file: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
+                dir_pattern: tokens.get(1).map(|t| strip_quotes(t).into()).unwrap_or_else(|| "*".into()),
+            }))
+        }
+        "list_files_append_file" => {
+            let tokens = run(ws_tokens, args, span, "list_files_append_file")?;
+            Ok(Statement::ListFilesAppendFile(ListFilesAppendFileCmd {
+                span,
+                file: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
+                dir_pattern: tokens.get(1).map(|t| strip_quotes(t).into()).unwrap_or_else(|| "*".into()),
+            }))
+        }
+        "force-rmdir" => Ok(Statement::ForceRmdir(ForceRmdirCmd { span, dir: strip_quotes(take_rest(&mut s)).into() })),
+        "force-cpdir" => {
+            let tokens = run(ws_tokens, args, span, "force-cpdir")?;
+            Ok(Statement::ForceCpdir(ForceCpdirCmd {
+                span,
+                source: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
+                dest: strip_quotes(tokens.get(1).copied().unwrap_or("")).into(),
+            }))
+        }
+        "force-restart" => Ok(Statement::DirtyClose(DirtyCloseCmd { span })),
+        "write_line" => {
+            let tokens = run(ws_tokens, args, span, "write_line")?;
+            Ok(Statement::WriteLine(WriteLineCmd {
+                span,
+                text: tokens.first().copied().unwrap_or("").into(),
+                file: tokens.get(1).map(|t| strip_quotes(t).into()).unwrap_or_else(|| "".into()),
+            }))
+        }
 
         "delimiter" => {
-            let new_delim = args.trim().to_string();
+            let new_delim = take_rest(&mut s).to_string();
             if new_delim.is_empty() {
                 return Err(ParseError::Syntax { message: "delimiter requires an argument".to_string(), span });
             }
@@ -181,42 +374,92 @@ pub(crate) fn parse_known_command(
         }
 
         "write_file" => {
-            let mut stream = args.trim();
-            let filename = parse_filename_token.parse_next(&mut stream).unwrap_or(args.trim());
+            let _ = ws(&mut s);
+            let filename = single_token(&mut s).unwrap_or("");
             Ok(Statement::WriteFile(WriteFileCmd { span, filename: filename.into(), end_marker: String::new(), content: String::new().into() }))
         }
         "append_file" => {
-            let mut stream = args.trim();
-            let filename = parse_filename_token.parse_next(&mut stream).unwrap_or(args.trim());
+            let _ = ws(&mut s);
+            let filename = single_token(&mut s).unwrap_or("");
             Ok(Statement::AppendFile(AppendFileCmd { span, filename: filename.into(), end_marker: String::new(), content: String::new().into() }))
         }
-        "remove_file" => parse_remove_file(args, span),
-        "remove_files_wildcard" => parse_remove_files_wildcard(args, span),
-        "copy_file" => parse_copy_file(args, span),
-        "move_file" => parse_move_file(args, span),
+        "remove_file" => {
+            let tokens = run(ws_tokens, args, span, "remove_file")?;
+            Ok(Statement::RemoveFile(RemoveFileCmd {
+                span,
+                file: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
+                timeout: tokens.get(1).map(|t| t.to_string()),
+            }))
+        }
+        "remove_files_wildcard" => {
+            let tokens = run(ws_tokens, args, span, "remove_files_wildcard")?;
+            Ok(Statement::RemoveFilesWildcard(RemoveFilesWildcardCmd {
+                span,
+                dir: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
+                pattern: tokens.get(1).copied().unwrap_or("").into(),
+                timeout: tokens.get(2).map(|t| t.to_string()),
+            }))
+        }
+        "copy_file" => {
+            let tokens = run(ws_tokens, args, span, "copy_file")?;
+            Ok(Statement::CopyFile(CopyFileCmd {
+                span,
+                source: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
+                dest: strip_quotes(tokens.get(1).copied().unwrap_or("")).into(),
+                retry: tokens.get(2).map(|t| t.to_string()),
+            }))
+        }
+        "move_file" => {
+            let tokens = run(ws_tokens, args, span, "move_file")?;
+            Ok(Statement::MoveFile(MoveFileCmd {
+                span,
+                source: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
+                dest: strip_quotes(tokens.get(1).copied().unwrap_or("")).into(),
+                timeout: tokens.get(2).map(|t| t.to_string()),
+            }))
+        }
         "mkdir" => {
-            let mut stream = args.trim();
-            let dir = parse_filename_token.parse_next(&mut stream).unwrap_or(args.trim());
+            let _ = ws(&mut s);
+            let dir = single_token(&mut s).unwrap_or("");
             Ok(Statement::Mkdir(MkdirCmd { span, dir: dir.into() }))
         }
         "rmdir" => {
-            let mut stream = args.trim();
-            let dir = parse_filename_token.parse_next(&mut stream).unwrap_or(args.trim());
+            let _ = ws(&mut s);
+            let dir = single_token(&mut s).unwrap_or("");
             Ok(Statement::Rmdir(RmdirCmd { span, dir: dir.into() }))
         }
-        "chmod" => parse_chmod(args, span),
-        "diff_files" => parse_diff_files(args, span),
+        "chmod" => {
+            let tokens = run(ws_tokens, args, span, "chmod")?;
+            Ok(Statement::Chmod(ChmodCmd {
+                span,
+                mode: tokens.first().copied().unwrap_or("").to_string(),
+                file: strip_quotes(tokens.get(1).copied().unwrap_or("")).into(),
+            }))
+        }
+        "diff_files" => {
+            let tokens = run(ws_tokens, args, span, "diff_files")?;
+            Ok(Statement::DiffFiles(DiffFilesCmd {
+                span,
+                file1: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
+                file2: strip_quotes(tokens.get(1).copied().unwrap_or("")).into(),
+            }))
+        }
         "file_exists" => {
-            let mut stream = args.trim();
-            let file = parse_filename_token.parse_next(&mut stream).unwrap_or(args.trim());
+            let _ = ws(&mut s);
+            let file = single_token(&mut s).unwrap_or("");
             Ok(Statement::FileExists(FileExistsCmd { span, file: file.into() }))
         }
         "cat_file" => {
-            let mut stream = args.trim();
-            let file = parse_filename_token.parse_next(&mut stream).unwrap_or(args.trim());
+            let _ = ws(&mut s);
+            let file = single_token(&mut s).unwrap_or("");
             Ok(Statement::CatFile(CatFileCmd { span, file: file.into() }))
         }
-        "list_files" => parse_list_files(args, span),
+        "list_files" => {
+            let tokens = run(ws_tokens, args, span, "list_files")?;
+            let dir = tokens.first().filter(|t| !t.is_empty()).map(|t| strip_quotes(t).into());
+            let pattern = tokens.get(1).filter(|t| !t.is_empty()).copied().map(|t| t.into());
+            Ok(Statement::ListFiles(ListFilesCmd { span, dir, pattern }))
+        }
 
         "shutdown_server" => Ok(Statement::ShutdownServer(ShutdownServerCmd { span })),
         "send_quit" => Ok(Statement::SendQuit(SendQuitCmd { span })),
@@ -232,13 +475,21 @@ pub(crate) fn parse_known_command(
             Ok(Statement::Sql(SqlStatement { span, sql: input.trim().into() }))
         }
 
-        "character_set" => Ok(Statement::CharacterSet(CharacterSetCmd { span, charset: args.trim().to_string() })),
-        "system" => Ok(Statement::System(SystemCmd { span, command: args.trim().into() })),
-        "real_sleep" => Ok(Statement::RealSleep(RealSleepCmd { span, seconds: args.trim().to_string() })),
-        "require" => Ok(Statement::Require(RequireCmd { span, file: args.trim().into() })),
+        "character_set" => Ok(Statement::CharacterSet(CharacterSetCmd { span, charset: take_rest(&mut s).to_string() })),
+        "system" => Ok(Statement::System(SystemCmd { span, command: take_rest(&mut s).into() })),
+        "real_sleep" => Ok(Statement::RealSleep(RealSleepCmd { span, seconds: take_rest(&mut s).to_string() })),
+        "require" => Ok(Statement::Require(RequireCmd { span, file: take_rest(&mut s).into() })),
         "lowercase_result" => Ok(Statement::LowercaseResult(LowercaseResultCmd { span })),
         "sync_slave_with_master" => Ok(Statement::SyncSlaveWithMaster(SyncSlaveWithMasterCmd { span })),
-        "copy_files_wildcard" => parse_copy_files_wildcard(args, span),
+        "copy_files_wildcard" => {
+            let tokens = run(ws_tokens, args, span, "copy_files_wildcard")?;
+            Ok(Statement::CopyFilesWildcard(CopyFilesWildcardCmd {
+                span,
+                source: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
+                dest: strip_quotes(tokens.get(1).copied().unwrap_or("")).into(),
+                retry: tokens.get(2).map(|t| t.to_string()),
+            }))
+        }
 
         _ => Err(ParseError::UnknownCommand { command: name.to_string(), span, suggestion: None }),
     }
@@ -272,133 +523,8 @@ pub(crate) fn strip_quotes(s: &str) -> &str {
 }
 
 // ---------------------------------------------------------------------------
-// Complex command parsers
+// Regex parsers (hand-written — byte-level escape/delimiter state machines)
 // ---------------------------------------------------------------------------
-
-/// Parse `--let $var = value` or `let var = value` (bare form, no `$` prefix).
-fn parse_let(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let trimmed = args.trim();
-
-    // Variable name extends until '=' or whitespace (matches mtr's do_let).
-    // '$' inside the name is a literal character, not a variable reference.
-    let var_name_end = trimmed.find(['=', ' ', '\t']).unwrap_or(trimmed.len());
-    let var_name = &trimmed[..var_name_end];
-
-    // Strip leading '$' if present (matches mtr's var_set behavior)
-    let var_name = var_name.strip_prefix('$').unwrap_or(var_name);
-
-    if var_name.is_empty() {
-        return Err(ParseError::Syntax { message: format!("invalid let syntax: {}", trimmed), span });
-    }
-
-    // Find '=' after variable name
-    let rest = trimmed[var_name_end..].trim_start();
-    let value_str = rest.strip_prefix('=')
-        .ok_or_else(|| ParseError::Syntax { message: format!("invalid let syntax: {}", trimmed), span })?
-        .trim();
-
-    // Check for backtick-enclosed query
-    if let Some(query) = value_str.strip_prefix('`')
-        && let Some(query) = query.strip_suffix('`')
-    {
-        return Ok(Statement::Let(LetCmd {
-            span,
-            variable: var_name.to_string(),
-            value: LetValue::Query(crate::ast::expr::QueryExpr::new(
-                crate::ast::Span::dummy(),
-                query.to_string(),
-            )),
-        }));
-    }
-
-    Ok(Statement::Let(LetCmd { span, variable: var_name.to_string(), value: LetValue::Literal(value_str.to_string()) }))
-}
-
-/// Parse `--inc $var`.
-fn parse_inc(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let mut stream = args.trim();
-    let var = parse_dollar_var.parse_next(&mut stream).unwrap_or("");
-    if var.is_empty() {
-        return Err(ParseError::Syntax { message: "inc requires a variable name ($var)".to_string(), span });
-    }
-    Ok(Statement::Inc(IncCmd { span, variable: var.to_string() }))
-}
-
-/// Parse `--dec $var`.
-fn parse_dec(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let mut stream = args.trim();
-    let var = parse_dollar_var.parse_next(&mut stream).unwrap_or("");
-    if var.is_empty() {
-        return Err(ParseError::Syntax { message: "dec requires a variable name ($var)".to_string(), span });
-    }
-    Ok(Statement::Dec(DecCmd { span, variable: var.to_string() }))
-}
-
-/// Parse `--expr $var = expression`.
-fn parse_expr(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let mut stream = args.trim();
-    let var_name = parse_dollar_var.parse_next(&mut stream)
-        .map_err(|_| ParseError::Syntax { message: format!("invalid expr syntax: {}", args.trim()), span })?;
-    let stream = stream.strip_prefix('=').unwrap_or(stream);
-    let expression = stream.trim().to_string();
-    if var_name.is_empty() || expression.is_empty() {
-        return Err(ParseError::Syntax { message: format!("invalid expr syntax: {}", args.trim()), span });
-    }
-    Ok(Statement::Expr(ExprCmd { span, variable: var_name.to_string(), expression }))
-}
-
-/// Parse `--error [code1, code2, ...]`.
-fn parse_error(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let trimmed = args.trim();
-    if trimmed.is_empty() {
-        return Ok(Statement::Error(ErrorCmd { span, error_codes: vec![] }));
-    }
-    let codes: Vec<InterpolatedText> = trimmed
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(Into::into)
-        .collect();
-    Ok(Statement::Error(ErrorCmd { span, error_codes: codes }))
-}
-
-/// Parse `--connect(name, host, user, pass, db, port, socket)`.
-fn parse_connect(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let trimmed = args.trim();
-
-    // Try parenthesized form: (name, host, user, pass, db, port, socket)
-    if let Some(inner) = trimmed.strip_prefix('(')
-        && let Some(inner) = inner.strip_suffix(')')
-    {
-        let parts: Vec<&str> = inner.split(',').collect();
-        let name = parts.first().map(|s| s.trim().into());
-        let mut params = ConnectParams::default();
-        if parts.len() > 1 { params.host = Some(parts[1].trim().into()); }
-        if parts.len() > 2 { params.user = Some(parts[2].trim().into()); }
-        if parts.len() > 3 { params.password = Some(parts[3].trim().into()); }
-        if parts.len() > 4 { params.database = Some(parts[4].trim().into()); }
-        if parts.len() > 5 { params.port = Some(parts[5].trim().into()); }
-        if parts.len() > 6 { params.socket = Some(parts[6].trim().into()); }
-        return Ok(Statement::Connect(ConnectCmd { span, name, params }));
-    }
-
-    Ok(Statement::Connect(ConnectCmd { span, name: Some(trimmed.into()), params: ConnectParams::default() }))
-}
-
-/// Parse `--change_user [user, password, database]`.
-fn parse_change_user(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let trimmed = args.trim();
-    if trimmed.is_empty() {
-        return Ok(Statement::ChangeUser(ChangeUserCmd { span, user: None, password: None, database: None }));
-    }
-    let parts: Vec<&str> = trimmed.split(',').collect();
-    Ok(Statement::ChangeUser(ChangeUserCmd {
-        span,
-        user: parts.first().map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| (*s).into()),
-        password: parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| (*s).into()),
-        database: parts.get(2).map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| (*s).into()),
-    }))
-}
 
 /// Parse `--replace_regex` with version-aware syntax dispatch.
 fn parse_replace_regex(stream: &Stream, args: &str, span: Span) -> Result<Statement, ParseError> {
@@ -552,34 +678,6 @@ fn scan_until_char<'a>(stream: &mut &'a str, ch: char) -> &'a str {
     result
 }
 
-/// Parse `--replace_result old new [old2 new2 ...]`.
-fn parse_replace_result(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let tokens: Vec<&str> = args.split_whitespace().collect();
-    let mut replacements = Vec::new();
-    let mut i = 0;
-    while i + 1 < tokens.len() {
-        replacements.push((tokens[i].into(), tokens[i + 1].into()));
-        i += 2;
-    }
-    Ok(Statement::ReplaceResult(ReplaceResultCmd { span, replacements }))
-}
-
-/// Parse `--replace_column col_num old new [col_num2 old2 new2 ...]`.
-fn parse_replace_column(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let tokens: Vec<&str> = args.split_whitespace().collect();
-    let mut replacements = Vec::new();
-    let mut i = 0;
-    while i + 2 < tokens.len() {
-        replacements.push(ReplaceColumnItem {
-            column: tokens[i].to_string(),
-            old_value: tokens[i + 1].into(),
-            new_value: tokens[i + 2].into(),
-        });
-        i += 3;
-    }
-    Ok(Statement::ReplaceColumn(ReplaceColumnCmd { span, replacements }))
-}
-
 // ---------------------------------------------------------------------------
 // Toggle commands
 // ---------------------------------------------------------------------------
@@ -621,149 +719,3 @@ fn toggle_kind(name: &str) -> ToggleKind {
         _ => ToggleKind::Warnings,
     }
 }
-
-// ---------------------------------------------------------------------------
-// File I/O command parsers
-// ---------------------------------------------------------------------------
-
-/// Parse whitespace-separated tokens, returning borrowed slices.
-fn parse_file_tokens(args: &str) -> Vec<&str> {
-    let mut stream: &str = args.trim();
-    parse_ws_tokens_inner(&mut stream).unwrap_or_default()
-}
-
-/// Winnow parser for whitespace-separated tokens.
-fn parse_ws_tokens_inner<'s>(input: &mut &'s str) -> winnow::ModalResult<Vec<&'s str>> {
-    separated(0.., take_till(1.., [' ', '\t', '\n', '\r']), take_while(1.., [' ', '\t']))
-        .parse_next(input)
-}
-
-/// `--remove_file file [timeout]`
-fn parse_remove_file(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let tokens = parse_file_tokens(args);
-    Ok(Statement::RemoveFile(RemoveFileCmd {
-        span,
-        file: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
-        timeout: tokens.get(1).map(|s| s.to_string()),
-    }))
-}
-
-/// `--remove_files_wildcard dir pattern [timeout]`
-fn parse_remove_files_wildcard(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let tokens = parse_file_tokens(args);
-    Ok(Statement::RemoveFilesWildcard(RemoveFilesWildcardCmd {
-        span,
-        dir: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
-        pattern: tokens.get(1).copied().unwrap_or("").into(),
-        timeout: tokens.get(2).map(|s| s.to_string()),
-    }))
-}
-
-/// `--copy_file src dest [retry]`
-fn parse_copy_file(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let tokens = parse_file_tokens(args);
-    Ok(Statement::CopyFile(CopyFileCmd {
-        span,
-        source: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
-        dest: strip_quotes(tokens.get(1).copied().unwrap_or("")).into(),
-        retry: tokens.get(2).map(|s| s.to_string()),
-    }))
-}
-
-/// `--move_file src dest [timeout]`
-fn parse_move_file(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let tokens = parse_file_tokens(args);
-    Ok(Statement::MoveFile(MoveFileCmd {
-        span,
-        source: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
-        dest: strip_quotes(tokens.get(1).copied().unwrap_or("")).into(),
-        timeout: tokens.get(2).map(|s| s.to_string()),
-    }))
-}
-
-/// `--chmod mode file`
-fn parse_chmod(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let tokens = parse_file_tokens(args);
-    Ok(Statement::Chmod(ChmodCmd {
-        span,
-        mode: tokens.first().copied().unwrap_or("").to_string(),
-        file: strip_quotes(tokens.get(1).copied().unwrap_or("")).into(),
-    }))
-}
-
-/// `--diff_files file1 file2`
-fn parse_diff_files(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let tokens = parse_file_tokens(args);
-    Ok(Statement::DiffFiles(DiffFilesCmd {
-        span,
-        file1: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
-        file2: strip_quotes(tokens.get(1).copied().unwrap_or("")).into(),
-    }))
-}
-
-/// `--list_files [dir] [pattern]`
-fn parse_list_files(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let tokens = parse_file_tokens(args);
-    let dir = tokens.first().filter(|s| !s.is_empty()).map(|s| strip_quotes(s).into());
-    let pattern = tokens.get(1).filter(|s| !s.is_empty()).copied().map(|s| s.into());
-    Ok(Statement::ListFiles(ListFilesCmd { span, dir, pattern }))
-}
-
-/// `--copy_files_wildcard src_pattern dest [retry]`
-fn parse_copy_files_wildcard(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let tokens = parse_file_tokens(args);
-    Ok(Statement::CopyFilesWildcard(CopyFilesWildcardCmd {
-        span,
-        source: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
-        dest: strip_quotes(tokens.get(1).copied().unwrap_or("")).into(),
-        retry: tokens.get(2).map(|s| s.to_string()),
-    }))
-}
-
-/// `--output file`
-fn parse_output_cmd(args: &str, span: Span) -> Result<Statement, ParseError> {
-    Ok(Statement::Output(OutputCmd { span, file: strip_quotes(args.trim()).into() }))
-}
-
-/// `--list_files_write_file file [dir_pattern]`
-fn parse_list_files_write_file(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let tokens = parse_file_tokens(args);
-    Ok(Statement::ListFilesWriteFile(ListFilesWriteFileCmd {
-        span,
-        file: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
-        dir_pattern: tokens.get(1).map(|s| strip_quotes(s).into()).unwrap_or_else(|| "*".into()),
-    }))
-}
-
-/// `--list_files_append_file file [dir_pattern]`
-fn parse_list_files_append_file(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let tokens = parse_file_tokens(args);
-    Ok(Statement::ListFilesAppendFile(ListFilesAppendFileCmd {
-        span,
-        file: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
-        dir_pattern: tokens.get(1).map(|s| strip_quotes(s).into()).unwrap_or_else(|| "*".into()),
-    }))
-}
-
-/// `--force-cpdir from_dir to_dir`
-fn parse_force_cpdir(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let tokens = parse_file_tokens(args);
-    Ok(Statement::ForceCpdir(ForceCpdirCmd {
-        span,
-        source: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
-        dest: strip_quotes(tokens.get(1).copied().unwrap_or("")).into(),
-    }))
-}
-
-/// `--write_line text file`
-fn parse_write_line(args: &str, span: Span) -> Result<Statement, ParseError> {
-    let tokens = parse_file_tokens(args);
-    Ok(Statement::WriteLine(WriteLineCmd {
-        span,
-        text: tokens.first().copied().unwrap_or("").into(),
-        file: tokens.get(1).map(|s| strip_quotes(s).into()).unwrap_or_else(|| "".into()),
-    }))
-}
-
-// ---------------------------------------------------------------------------
-// Toggle commands

@@ -78,7 +78,7 @@ pub(crate) fn range_to_span(stream: &Stream, range: Range<usize>) -> Span {
 }
 
 /// Convert a winnow error at a given span into a `ParseError`.
-fn modal_err_to_parse_err(e: winnow::error::ErrMode<winnow::error::ContextError>, span: Span, context: &str) -> ParseError {
+pub(crate) fn modal_err_to_parse_err(e: winnow::error::ErrMode<winnow::error::ContextError>, span: Span, context: &str) -> ParseError {
     ParseError::Syntax {
         message: format!("{}: {}", context, e),
         span,
