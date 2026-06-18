@@ -34,7 +34,7 @@ impl InterpolatedText {
                 chars.next(); // consume '\'
                 if chars.peek().map(|&(_, c)| c) == Some('$') {
                     chars.next(); // consume '$'
-                    literal.push_str("$");
+                    literal.push('$');
                 } else {
                     literal.push('\\');
                 }

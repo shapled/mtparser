@@ -12,7 +12,7 @@ use crate::ast::statement::*;
 use crate::ast::text::InterpolatedText;
 use crate::ast::Span;
 use crate::error::ParseError;
-use crate::parser::ParseContext;
+use crate::parser::Stream;
 use crate::version::MysqlVersion;
 
 // ---------------------------------------------------------------------------
@@ -52,16 +52,16 @@ fn parse_filename_token<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str>
 
 /// Parse a known command by name.
 pub(crate) fn parse_known_command(
-    ctx: &mut ParseContext,
+    stream: &mut Stream,
     name: &str,
     input: &str,
     span: Span,
 ) -> Result<Statement, ParseError> {
     // Check version compatibility for version-specific commands
-    if !ctx.config.version.has_command(name) {
+    if !stream.state.version.has_command(name) {
         return Err(ParseError::VersionMismatch {
             command: name.to_string(),
-            version: format!("{:?}", ctx.config.version),
+            version: format!("{:?}", stream.state.version),
             span,
         });
     }
@@ -107,7 +107,7 @@ pub(crate) fn parse_known_command(
         "sorted_result" => Ok(Statement::SortedResult(SortedResultCmd { span })),
         "replace_result" => parse_replace_result(args, span),
         "replace_column" => parse_replace_column(args, span),
-        "replace_regex" => parse_replace_regex(ctx, args, span),
+        "replace_regex" => parse_replace_regex(stream, args, span),
         "partially_sorted_result" => Ok(Statement::PartiallySortedResult(PartiallySortedResultCmd { span, columns: args.trim().to_string() })),
         "replace_numeric_round" => Ok(Statement::ReplaceNumericRound(ReplaceNumericRoundCmd { span, decimals: args.trim().to_string() })),
 
@@ -176,7 +176,7 @@ pub(crate) fn parse_known_command(
             if new_delim.is_empty() {
                 return Err(ParseError::Syntax { message: "delimiter requires an argument".to_string(), span });
             }
-            ctx.delimiter = new_delim.clone();
+            stream.state.delimiter = new_delim.clone();
             Ok(Statement::Delimiter(DelimiterCmd { span, new_delimiter: new_delim }))
         }
 
@@ -226,8 +226,8 @@ pub(crate) fn parse_known_command(
         "end" => Ok(Statement::End(EndCmd { span })),
 
         "assert" => {
-            if !ctx.config.version.has_assert() {
-                return Err(ParseError::VersionMismatch { command: "assert".to_string(), version: format!("{:?}", ctx.config.version), span });
+            if !stream.state.version.has_assert() {
+                return Err(ParseError::VersionMismatch { command: "assert".to_string(), version: format!("{:?}", stream.state.version), span });
             }
             Ok(Statement::Sql(SqlStatement { span, sql: input.trim().into() }))
         }
@@ -263,10 +263,10 @@ pub(crate) fn strip_quotes(s: &str) -> &str {
         return s;
     }
     let first = s.as_bytes()[0];
-    if first == b'"' || first == b'\'' || first == b'`' {
-        if let Some(pos) = s[1..].find(char::from(first)) {
-            return &s[1..pos + 1];
-        }
+    if (first == b'"' || first == b'\'' || first == b'`')
+        && let Some(pos) = s[1..].find(char::from(first))
+    {
+        return &s[1..pos + 1];
     }
     s
 }
@@ -281,7 +281,7 @@ fn parse_let(args: &str, span: Span) -> Result<Statement, ParseError> {
 
     // Variable name extends until '=' or whitespace (matches mtr's do_let).
     // '$' inside the name is a literal character, not a variable reference.
-    let var_name_end = trimmed.find(|c| c == '=' || c == ' ' || c == '\t').unwrap_or(trimmed.len());
+    let var_name_end = trimmed.find(['=', ' ', '\t']).unwrap_or(trimmed.len());
     let var_name = &trimmed[..var_name_end];
 
     // Strip leading '$' if present (matches mtr's var_set behavior)
@@ -298,17 +298,17 @@ fn parse_let(args: &str, span: Span) -> Result<Statement, ParseError> {
         .trim();
 
     // Check for backtick-enclosed query
-    if let Some(query) = value_str.strip_prefix('`') {
-        if let Some(query) = query.strip_suffix('`') {
-            return Ok(Statement::Let(LetCmd {
-                span,
-                variable: var_name.to_string(),
-                value: LetValue::Query(crate::ast::expr::QueryExpr::new(
-                    crate::ast::Span::dummy(),
-                    query.to_string(),
-                )),
-            }));
-        }
+    if let Some(query) = value_str.strip_prefix('`')
+        && let Some(query) = query.strip_suffix('`')
+    {
+        return Ok(Statement::Let(LetCmd {
+            span,
+            variable: var_name.to_string(),
+            value: LetValue::Query(crate::ast::expr::QueryExpr::new(
+                crate::ast::Span::dummy(),
+                query.to_string(),
+            )),
+        }));
     }
 
     Ok(Statement::Let(LetCmd { span, variable: var_name.to_string(), value: LetValue::Literal(value_str.to_string()) }))
@@ -367,19 +367,19 @@ fn parse_connect(args: &str, span: Span) -> Result<Statement, ParseError> {
     let trimmed = args.trim();
 
     // Try parenthesized form: (name, host, user, pass, db, port, socket)
-    if let Some(inner) = trimmed.strip_prefix('(') {
-        if let Some(inner) = inner.strip_suffix(')') {
-            let parts: Vec<&str> = inner.split(',').collect();
-            let name = parts.first().map(|s| s.trim().into());
-            let mut params = ConnectParams::default();
-            if parts.len() > 1 { params.host = Some(parts[1].trim().into()); }
-            if parts.len() > 2 { params.user = Some(parts[2].trim().into()); }
-            if parts.len() > 3 { params.password = Some(parts[3].trim().into()); }
-            if parts.len() > 4 { params.database = Some(parts[4].trim().into()); }
-            if parts.len() > 5 { params.port = Some(parts[5].trim().into()); }
-            if parts.len() > 6 { params.socket = Some(parts[6].trim().into()); }
-            return Ok(Statement::Connect(ConnectCmd { span, name, params }));
-        }
+    if let Some(inner) = trimmed.strip_prefix('(')
+        && let Some(inner) = inner.strip_suffix(')')
+    {
+        let parts: Vec<&str> = inner.split(',').collect();
+        let name = parts.first().map(|s| s.trim().into());
+        let mut params = ConnectParams::default();
+        if parts.len() > 1 { params.host = Some(parts[1].trim().into()); }
+        if parts.len() > 2 { params.user = Some(parts[2].trim().into()); }
+        if parts.len() > 3 { params.password = Some(parts[3].trim().into()); }
+        if parts.len() > 4 { params.database = Some(parts[4].trim().into()); }
+        if parts.len() > 5 { params.port = Some(parts[5].trim().into()); }
+        if parts.len() > 6 { params.socket = Some(parts[6].trim().into()); }
+        return Ok(Statement::Connect(ConnectCmd { span, name, params }));
     }
 
     Ok(Statement::Connect(ConnectCmd { span, name: Some(trimmed.into()), params: ConnectParams::default() }))
@@ -401,8 +401,8 @@ fn parse_change_user(args: &str, span: Span) -> Result<Statement, ParseError> {
 }
 
 /// Parse `--replace_regex` with version-aware syntax dispatch.
-fn parse_replace_regex(ctx: &ParseContext, args: &str, span: Span) -> Result<Statement, ParseError> {
-    parse_replace_regex_versioned(args, span, &ctx.config.version)
+fn parse_replace_regex(stream: &Stream, args: &str, span: Span) -> Result<Statement, ParseError> {
+    parse_replace_regex_versioned(args, span, &stream.state.version)
 }
 
 /// Parse `--replace_regex` with version-aware syntax.
@@ -704,7 +704,7 @@ fn parse_diff_files(args: &str, span: Span) -> Result<Statement, ParseError> {
 /// `--list_files [dir] [pattern]`
 fn parse_list_files(args: &str, span: Span) -> Result<Statement, ParseError> {
     let tokens = parse_file_tokens(args);
-    let dir = tokens.first().filter(|s| !s.is_empty()).map(|s| strip_quotes(*s).into());
+    let dir = tokens.first().filter(|s| !s.is_empty()).map(|s| strip_quotes(s).into());
     let pattern = tokens.get(1).filter(|s| !s.is_empty()).copied().map(|s| s.into());
     Ok(Statement::ListFiles(ListFilesCmd { span, dir, pattern }))
 }
@@ -731,7 +731,7 @@ fn parse_list_files_write_file(args: &str, span: Span) -> Result<Statement, Pars
     Ok(Statement::ListFilesWriteFile(ListFilesWriteFileCmd {
         span,
         file: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
-        dir_pattern: tokens.get(1).map(|s| strip_quotes(*s).into()).unwrap_or_else(|| "*".into()),
+        dir_pattern: tokens.get(1).map(|s| strip_quotes(s).into()).unwrap_or_else(|| "*".into()),
     }))
 }
 
@@ -741,7 +741,7 @@ fn parse_list_files_append_file(args: &str, span: Span) -> Result<Statement, Par
     Ok(Statement::ListFilesAppendFile(ListFilesAppendFileCmd {
         span,
         file: strip_quotes(tokens.first().copied().unwrap_or("")).into(),
-        dir_pattern: tokens.get(1).map(|s| strip_quotes(*s).into()).unwrap_or_else(|| "*".into()),
+        dir_pattern: tokens.get(1).map(|s| strip_quotes(s).into()).unwrap_or_else(|| "*".into()),
     }))
 }
 
@@ -761,7 +761,7 @@ fn parse_write_line(args: &str, span: Span) -> Result<Statement, ParseError> {
     Ok(Statement::WriteLine(WriteLineCmd {
         span,
         text: tokens.first().copied().unwrap_or("").into(),
-        file: tokens.get(1).map(|s| strip_quotes(*s).into()).unwrap_or_else(|| "".into()),
+        file: tokens.get(1).map(|s| strip_quotes(s).into()).unwrap_or_else(|| "".into()),
     }))
 }
 

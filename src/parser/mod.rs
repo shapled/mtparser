@@ -4,14 +4,17 @@
 //! - [`parse`] — parse a string into a [`MTFile`]
 //! - [`parse_bytes`] — parse raw bytes (UTF-8 lossy conversion)
 //!
-//! The parser operates line-by-line with winnow combinators for token-level
-//! parsing (`take_till`, `take_while`) and `dispatch!` for prefix-based
-//! operator matching in condition expressions.
+//! The parser uses `winnow::stream::Stateful<LocatingSlice<&str>, ParserState>`
+//! as the unified stream type. `ParserState` carries version and delimiter,
+//! while `LocatingSlice` tracks byte offsets for span generation.
 
 pub mod command;
 pub mod flow;
 
+use std::ops::Range;
+
 use winnow::Parser;
+use winnow::stream::{LocatingSlice, Stateful, Stream as StreamTrait};
 use winnow::token::{take_till, take_while};
 
 use crate::ast::MTFile;
@@ -40,26 +43,53 @@ impl ParserConfig {
     }
 }
 
-/// Mutable parsing context carried through the parse.
+/// Parsing state threaded through winnow combinators via `Stateful`.
+/// Contains version (immutable), delimiter (mutable), and original source (for span computation).
 #[derive(Debug, Clone)]
-pub(crate) struct ParseContext {
-    pub(crate) config: ParserConfig,
+pub(crate) struct ParserState {
+    pub(crate) version: MysqlVersion,
     pub(crate) delimiter: String,
-    pub(crate) line_num: u32,
-    pub(crate) offset: usize,
-    pub(crate) column: u32,
+    pub(crate) source: String,
 }
 
-impl ParseContext {
-    pub(crate) fn new(config: ParserConfig) -> Self {
+impl ParserState {
+    pub(crate) fn new(version: MysqlVersion, source: &str) -> Self {
         Self {
-            config,
+            version,
             delimiter: ";".to_string(),
-            line_num: 1,
-            offset: 0,
-            column: 1,
+            source: source.to_string(),
         }
     }
+}
+
+/// The unified stream type used throughout the parser.
+pub(crate) type Stream<'s> = Stateful<LocatingSlice<&'s str>, ParserState>;
+
+/// Convert a byte-offset range from `LocatingSlice` into an `ast::Span`.
+pub(crate) fn range_to_span(stream: &Stream, range: Range<usize>) -> Span {
+    let source = &stream.state.source;
+    let offset = range.start.min(source.len());
+    let end = range.end.min(source.len());
+    let len = end - offset;
+    let line = source[..offset].matches('\n').count() as u32 + 1;
+    let last_nl = source[..offset].rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let column = (offset - last_nl + 1) as u32;
+    Span::new(line, column, offset, len)
+}
+
+/// Convert a winnow error at a given span into a `ParseError`.
+fn modal_err_to_parse_err(e: winnow::error::ErrMode<winnow::error::ContextError>, span: Span, context: &str) -> ParseError {
+    ParseError::Syntax {
+        message: format!("{}: {}", context, e),
+        span,
+    }
+}
+
+/// Create a span at the current stream offset with zero length (used as placeholder).
+fn span_for_current_offset(_stream: &Stream) -> Span {
+    // We can't get current_token_start easily without Location trait,
+    // so use a simple approximation
+    Span::dummy()
 }
 
 /// Parse a complete test file into an AST.
@@ -70,64 +100,81 @@ pub fn parse_bytes(input: &[u8], config: ParserConfig) -> Result<MTFile, ParseEr
 
 /// Parse a complete test file into an AST.
 pub fn parse(input: &str, config: ParserConfig) -> Result<MTFile, ParseError> {
-    let mut ctx = ParseContext::new(config);
-    let (statements, _pos, _ln) = parse_statements(&mut ctx, input, 0, 1)?;
+    let state = ParserState::new(config.version, input);
+    let mut stream = Stream {
+        input: LocatingSlice::new(input),
+        state,
+    };
+    let statements = parse_statements_inner(&mut stream)?;
     Ok(MTFile::new(statements))
 }
 
-/// Read one line using winnow's `take_till` combinator.
-/// Returns (line_content, remaining_input).
-fn read_line(input: &str) -> (&str, &str) {
-    let mut stream: &str = input;
-    let line = parse_line_inner(&mut stream).unwrap_or("");
-    (line, stream)
+/// Parse one line from the stream, consuming the line ending.
+/// Advances the stream past the line and its newline.
+#[allow(dead_code)]
+fn parse_line<'s>(stream: &mut Stream<'s>) -> winnow::ModalResult<&'s str> {
+    let line = take_till(1.., ['\r', '\n']).parse_next(stream)?;
+    // Consume optional \r\n or \n
+    let _ = take_while(0.., ['\r', '\n']).parse_next(stream)?;
+    Ok(line)
 }
 
-/// Winnow parser: consume until `\r` or `\n`.
-fn parse_line_inner<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str> {
-    take_till(1.., ['\r', '\n']).parse_next(input)
+/// Parse one line including leading whitespace, returning trimmed content and the span range.
+fn peek_line_trimmed<'s>(stream: &mut Stream<'s>) -> winnow::ModalResult<(&'s str, Range<usize>)> {
+    // Take content until \n, then consume exactly one \n (not all of them)
+    let (line_content, range) = take_till(0.., ['\r', '\n'])
+        .with_span()
+        .parse_next(stream)?;
+    // Consume exactly one newline character (\n or \r\n)
+    // Consume exactly one newline character (\n or \r\n)
+    let _: winnow::ModalResult<char> = winnow::token::one_of(['\n']).parse_next(stream);
+    let _: winnow::ModalResult<char> = winnow::token::one_of(['\r']).parse_next(stream);
+    let trimmed = line_content.trim();
+    // Adjust range start to skip leading whitespace
+    let leading = line_content.len() - trimmed.len();
+    // Range end should be the end of visible content, not including newline
+    let content_end = range.start + line_content.len();
+    let adjusted_range = (range.start + leading)..content_end;
+    Ok((trimmed, adjusted_range))
 }
 
-/// Extract an identifier (alphanumeric + underscore) using winnow's `take_while` combinator.
+/// Parse one line returning the original (untrimmed) content.
+/// Used for delimiter-terminated SQL and file content where leading whitespace matters.
+fn read_line_original<'s>(stream: &mut Stream<'s>) -> winnow::ModalResult<&'s str> {
+    let line = take_till(0.., ['\r', '\n']).parse_next(stream)?;
+    // Consume optional \r\n or \n
+    let _ = take_while(0.., ['\r', '\n']).parse_next(stream)?;
+    Ok(line)
+}
+
+/// Extract an identifier (alphanumeric + underscore + hyphen) as a plain string.
+/// Used for quick lookahead before dispatch — not a stream combinator.
 fn parse_identifier(s: &str) -> &str {
     let mut stream: &str = s;
-    parse_identifier_inner(&mut stream).unwrap_or("")
+    let result: winnow::ModalResult<&str> =
+        take_while(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_', '-'))
+            .parse_next(&mut stream);
+    result.unwrap_or("")
 }
 
-/// Winnow parser: consume identifier characters (including hyphens for commands like force-rmdir).
-fn parse_identifier_inner<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s str> {
-    take_while(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_', '-')).parse_next(input)
-}
-
-/// Parse a sequence of statements from input starting at pos.
-fn parse_statements(
-    ctx: &mut ParseContext,
-    input: &str,
-    mut pos: usize,
-    mut line_num: u32,
-) -> Result<(Vec<Statement>, usize, u32), ParseError> {
+/// Internal: parse a sequence of statements from the stream until `}` or EOF.
+fn parse_statements_inner(stream: &mut Stream) -> Result<Vec<Statement>, ParseError> {
     let mut statements = Vec::new();
 
-    while pos < input.len() {
-        let remaining = &input[pos..];
-
-        // Check for closing brace
+    while !stream.input.is_empty() {
+        // Check for closing brace (don't consume)
+        let remaining = *stream.input;
         if remaining.trim_start().starts_with('}') {
             break;
         }
 
-        let line_end = remaining.find('\n').unwrap_or(remaining.len());
-        let line_len = if line_end < remaining.len() {
-            line_end + 1
-        } else {
-            line_end
-        };
-        let trimmed = remaining[..line_end].trim();
-        let leading_spaces = remaining.len() - trimmed.len();
-        ctx.column = (leading_spaces + 1) as u32;
-        ctx.line_num = line_num;
-        ctx.offset = pos;
-        let span = Span::new(line_num, ctx.column, pos, line_len);
+        // Save checkpoint for potential backtracking
+        let start = StreamTrait::checkpoint(&stream.input);
+
+        // Read the trimmed line and its span
+        let (trimmed, range) = peek_line_trimmed(stream)
+            .map_err(|e| modal_err_to_parse_err(e, Span::dummy(), "reading line"))?;
+        let span = range_to_span(stream, range);
 
         if trimmed.is_empty() {
             statements.push(Statement::Empty);
@@ -147,45 +194,23 @@ fn parse_statements(
             match first_word.to_ascii_lowercase().as_str() {
                 "if" => {
                     let condition_text = rest[first_word.len()..].trim();
-                    let (block, new_pos, new_ln) =
-                        parse_if_block(ctx, condition_text, input, pos + line_len, line_num, span)?;
+                    let block = parse_if_block(stream, condition_text, span)?;
                     statements.push(Statement::If(block));
-                    pos = new_pos;
-                    line_num = new_ln;
-                    continue;
                 }
                 "while" => {
                     let condition_text = rest[first_word.len()..].trim();
-                    let (block, new_pos, new_ln) = parse_while_block(
-                        ctx,
-                        condition_text,
-                        input,
-                        pos + line_len,
-                        line_num,
-                        span,
-                    )?;
+                    let block = parse_while_block(stream, condition_text, span)?;
                     statements.push(Statement::While(block));
-                    pos = new_pos;
-                    line_num = new_ln;
-                    continue;
                 }
                 "write_file" => {
                     let args = rest[first_word.len()..].trim();
-                    let (stmt, new_pos, new_ln) =
-                        parse_write_file_block(args, input, pos + line_len, line_num, span)?;
+                    let stmt = parse_write_file_block(stream, args, span)?;
                     statements.push(stmt);
-                    pos = new_pos;
-                    line_num = new_ln;
-                    continue;
                 }
                 "append_file" => {
                     let args = rest[first_word.len()..].trim();
-                    let (stmt, new_pos, new_ln) =
-                        parse_append_file_block(args, input, pos + line_len, line_num, span)?;
+                    let stmt = parse_append_file_block(stream, args, span)?;
                     statements.push(stmt);
-                    pos = new_pos;
-                    line_num = new_ln;
-                    continue;
                 }
                 "perl" => {
                     let arg_text = rest[first_word.len()..].trim();
@@ -194,15 +219,11 @@ fn parse_statements(
                     } else {
                         arg_text.to_string()
                     };
-                    let (block, new_pos, new_ln) =
-                        parse_perl_block(&end_marker, input, pos + line_len, line_num, span)?;
+                    let block = parse_perl_block(stream, &end_marker, span)?;
                     statements.push(Statement::Perl(block));
-                    pos = new_pos;
-                    line_num = new_ln;
-                    continue;
                 }
                 _ => {
-                    let stmt = parse_double_dash_command(ctx, rest, span)?;
+                    let stmt = parse_double_dash_command(stream, rest, span)?;
                     statements.push(stmt);
                 }
             }
@@ -212,87 +233,53 @@ fn parse_statements(
 
             match first_word.to_ascii_lowercase().as_str() {
                 "delimiter" => {
-                    let stmt = command::parse_known_command(ctx, "delimiter", trimmed, span)?;
+                    let stmt = command::parse_known_command(stream, "delimiter", trimmed, span)?;
                     statements.push(stmt);
-                    pos += line_len;
-                    line_num += 1;
-                    continue;
                 }
                 "write_file" => {
                     let rest = trimmed[first_word.len()..].trim();
-                    // Strip trailing delimiter, but only after quotes are handled
-                    // to avoid cutting inside quoted filenames like "file;name"
-                    let rest = strip_trailing_delimiter_quoted(rest, &ctx.delimiter);
-                    let (stmt, new_pos, new_ln) =
-                        parse_write_file_block(rest, input, pos + line_len, line_num, span)?;
+                    let rest = strip_trailing_delimiter_quoted(rest, &stream.state.delimiter);
+                    let stmt = parse_write_file_block(stream, rest, span)?;
                     statements.push(stmt);
-                    pos = new_pos;
-                    line_num = new_ln;
-                    continue;
                 }
                 "append_file" => {
                     let rest = trimmed[first_word.len()..].trim();
-                    let rest = strip_trailing_delimiter_quoted(rest, &ctx.delimiter);
-                    let (stmt, new_pos, new_ln) =
-                        parse_append_file_block(rest, input, pos + line_len, line_num, span)?;
+                    let rest = strip_trailing_delimiter_quoted(rest, &stream.state.delimiter);
+                    let stmt = parse_append_file_block(stream, rest, span)?;
                     statements.push(stmt);
-                    pos = new_pos;
-                    line_num = new_ln;
-                    continue;
                 }
                 "if" => {
-                    let leading = line_end - trimmed.len();
-                    let cond_start = pos + leading + first_word.len();
-                    let (stmt, new_pos, new_ln) = parse_bare_flow_block(
-                        ctx, input, pos, line_len, line_num, cond_start, span, false,
-                    )?;
+                    let stmt = parse_bare_flow_block(stream, trimmed, span, false)?;
                     statements.push(stmt);
-                    pos = new_pos;
-                    line_num = new_ln;
-                    continue;
                 }
                 "while" => {
-                    let leading = line_end - trimmed.len();
-                    let cond_start = pos + leading + first_word.len();
-                    let (stmt, new_pos, new_ln) = parse_bare_flow_block(
-                        ctx, input, pos, line_len, line_num, cond_start, span, true,
-                    )?;
+                    let stmt = parse_bare_flow_block(stream, trimmed, span, true)?;
                     statements.push(stmt);
-                    pos = new_pos;
-                    line_num = new_ln;
-                    continue;
                 }
                 "perl" => {
                     let rest = trimmed[first_word.len()..].trim();
-                    let arg = rest.strip_suffix(&ctx.delimiter).unwrap_or(rest).trim();
+                    let arg = rest.strip_suffix(&stream.state.delimiter).unwrap_or(rest).trim();
                     let end_marker = if arg.is_empty() {
                         "EOF".to_string()
                     } else {
                         arg.to_string()
                     };
-                    let (block, new_pos, new_ln) =
-                        parse_perl_block(&end_marker, input, pos + line_len, line_num, span)?;
+                    let block = parse_perl_block(stream, &end_marker, span)?;
                     statements.push(Statement::Perl(block));
-                    pos = new_pos;
-                    line_num = new_ln;
-                    continue;
                 }
                 _ => {
-                    let (stmt, consumed) =
-                        parse_delimiter_terminated(ctx, input, pos, line_num, span)?;
+                    // Default: may be multi-line delimiter-terminated text.
+                    // Restore the stream to before the line was consumed,
+                    // then use parse_delimiter_terminated.
+                    StreamTrait::reset(&mut stream.input, &start);
+                    let stmt = parse_delimiter_terminated(stream, span)?;
                     statements.push(stmt);
-                    pos += consumed;
-                    line_num += input[pos - consumed..pos].matches('\n').count() as u32;
-                    continue;
                 }
             }
         }
-
-        pos += line_len;
-        line_num += 1;
     }
 
-    Ok((statements, pos, line_num))
+    Ok(statements)
 }
 
 /// Classification result for a command name.
@@ -434,13 +421,13 @@ pub(crate) fn classify_command(word: &str) -> CommandKind {
 }
 /// Parse `--command args` line.
 fn parse_double_dash_command(
-    ctx: &mut ParseContext,
+    stream: &mut Stream,
     rest: &str,
     span: Span,
 ) -> Result<Statement, ParseError> {
     let first_word = parse_identifier(rest);
     match classify_command(first_word) {
-        CommandKind::Known(name) => command::parse_known_command(ctx, &name, rest, span),
+        CommandKind::Known(name) => command::parse_known_command(stream, &name, rest, span),
         CommandKind::Unknown => Err(ParseError::UnknownCommand {
             command: first_word.to_string(),
             span,
@@ -451,165 +438,96 @@ fn parse_double_dash_command(
 
 /// Parse `--if (condition)` followed by `{ body }` across multiple lines.
 fn parse_if_block(
-    ctx: &mut ParseContext,
+    stream: &mut Stream,
     condition_text: &str,
-    input: &str,
-    after_first_line: usize,
-    start_line: u32,
     span: Span,
-) -> Result<(IfBlock, usize, u32), ParseError> {
-    let condition = flow::parse_condition(condition_text, ctx.config.version)?;
-    let brace_on_first_line = condition_text.trim().ends_with('{');
-    let (open_brace_pos, open_brace_line) = if brace_on_first_line {
-        (after_first_line, start_line + 1)
-    } else {
-        find_open_brace(input, after_first_line, start_line)?
-    };
-    let (body, after_body_pos, after_body_line) =
-        parse_statements(ctx, input, open_brace_pos, open_brace_line)?;
-    let (end_pos, end_line) = consume_close_brace(input, after_body_pos, after_body_line)?;
-    Ok((
-        IfBlock {
-            span,
-            condition,
-            body,
-        },
-        end_pos,
-        end_line,
-    ))
+) -> Result<IfBlock, ParseError> {
+    let condition = flow::parse_condition(condition_text, stream.state.version)?;
+
+    // If `{` is on the same line as the condition, body starts right after `{`
+    if condition_text.trim().ends_with('{') {
+        let body = parse_statements_inner(stream)?;
+        consume_close_brace(stream)?;
+        return Ok(IfBlock { span, condition, body });
+    }
+
+    // Find `{` on subsequent lines
+    find_open_brace(stream)?;
+    let body = parse_statements_inner(stream)?;
+    consume_close_brace(stream)?;
+    Ok(IfBlock { span, condition, body })
 }
 
 /// Parse `--while (condition)` followed by `{ body }` across multiple lines.
 fn parse_while_block(
-    ctx: &mut ParseContext,
+    stream: &mut Stream,
     condition_text: &str,
-    input: &str,
-    after_first_line: usize,
-    start_line: u32,
     span: Span,
-) -> Result<(WhileBlock, usize, u32), ParseError> {
-    let condition = flow::parse_condition(condition_text, ctx.config.version)?;
-    let brace_on_first_line = condition_text.trim().ends_with('{');
-    let (open_brace_pos, open_brace_line) = if brace_on_first_line {
-        (after_first_line, start_line + 1)
-    } else {
-        find_open_brace(input, after_first_line, start_line)?
-    };
-    let (body, after_body_pos, after_body_line) =
-        parse_statements(ctx, input, open_brace_pos, open_brace_line)?;
-    let (end_pos, end_line) = consume_close_brace(input, after_body_pos, after_body_line)?;
-    Ok((
-        WhileBlock {
-            span,
-            condition,
-            body,
-        },
-        end_pos,
-        end_line,
-    ))
+) -> Result<WhileBlock, ParseError> {
+    let condition = flow::parse_condition(condition_text, stream.state.version)?;
+
+    if condition_text.trim().ends_with('{') {
+        let body = parse_statements_inner(stream)?;
+        consume_close_brace(stream)?;
+        return Ok(WhileBlock { span, condition, body });
+    }
+
+    find_open_brace(stream)?;
+    let body = parse_statements_inner(stream)?;
+    consume_close_brace(stream)?;
+    Ok(WhileBlock { span, condition, body })
 }
 
-/// Find the opening `{` brace for an if/while block.
-/// Handles `{` alone on a line or `{` with content after it.
-/// Returns `(body_start_pos, body_line_num)`.
-fn find_open_brace(
-    input: &str,
-    start_pos: usize,
-    mut line_num: u32,
-) -> Result<(usize, u32), ParseError> {
-    let mut pos = start_pos;
-    let start_line = line_num;
-    loop {
-        if pos >= input.len() {
-            return Err(ParseError::UnterminatedFlowControl {
-                kind: "if/while".to_string(),
-                span: Span::new(start_line, 1, start_pos, pos - start_pos),
-            });
+/// Find and consume the opening `{` brace for an if/while block.
+/// Advances the stream past the `{` line. The body starts at the stream's
+/// current position after this returns.
+fn find_open_brace(stream: &mut Stream) -> Result<(), ParseError> {
+    let mut start_span = Span::dummy();
+
+    while !stream.input.is_empty() {
+        let (trimmed, range) = peek_line_trimmed(stream)
+            .map_err(|e| modal_err_to_parse_err(e, start_span, "find_open_brace"))?;
+        if start_span == Span::dummy() {
+            start_span = range_to_span(stream, range.clone());
         }
-        let (line, _) = read_line(&input[pos..]);
-        let line_end = input[pos..].find('\n').unwrap_or(input[pos..].len());
-        let line_len = if line_end < input[pos..].len() {
-            line_end + 1
-        } else {
-            line_end
-        };
-        let trimmed = line.trim();
+
         if trimmed.starts_with('{') {
-            let brace_leading = line.len() - trimmed.len();
-            let after_brace = pos + brace_leading + 1;
-            let rest_of_line = trimmed.get(1..).map(|s| s.trim()).unwrap_or("");
-            if rest_of_line.is_empty() {
-                // `{` alone — body starts on next line
-                pos += line_len;
-                line_num += 1;
-                return Ok((pos, line_num));
-            }
-            // `{` with content — body starts right after `{`
-            return Ok((after_brace, line_num + 1));
+            return Ok(());
         }
-        pos += line_len;
-        line_num += 1;
     }
-}
 
-/// Scan for the opening `{` of a bare (non-`--` prefixed) if/while block.
-/// Searches from `condition_start` (right after the keyword) in the input.
-/// Returns `(condition_text, body_start_pos, body_line_num)`.
-fn scan_bare_block_brace(
-    input: &str,
-    condition_start: usize,
-    first_line_num: u32,
-) -> Result<(String, usize, u32), ParseError> {
-    let search = &input[condition_start..];
-    let brace_offset = match search.find('{') {
-        Some(p) => p,
-        None => {
-            return Err(ParseError::UnterminatedFlowControl {
-                kind: "if/while".to_string(),
-                span: Span::new(first_line_num, 1, condition_start, search.len()),
-            });
-        }
-    };
-    let condition_text = search[..brace_offset].trim().to_string();
-    let mut body_start = condition_start + brace_offset + 1;
-    // Skip newline if `{` was at end of line
-    if body_start < input.len() && input.as_bytes()[body_start] == b'\n' {
-        body_start += 1;
-    }
-    let body_line =
-        first_line_num + input[condition_start..body_start].matches('\n').count() as u32;
-    Ok((condition_text, body_start, body_line))
+    Err(ParseError::UnterminatedFlowControl {
+        kind: "if/while".to_string(),
+        span: start_span,
+    })
 }
 
 /// Handle bare (non-`--` prefixed) if/while block parsing.
-/// Supports multi-line conditions, `{` with content after, and inline `if (cond) { body; }`.
+/// `line_content` is the already-consumed trimmed line (e.g., `if ($x > 0) {`).
 fn parse_bare_flow_block(
-    ctx: &mut ParseContext,
-    input: &str,
-    pos: usize,
-    line_len: usize,
-    line_num: u32,
-    cond_start: usize,
+    stream: &mut Stream,
+    line_content: &str,
     span: Span,
     is_while: bool,
-) -> Result<(Statement, usize, u32), ParseError> {
-    let (condition_text, body_start, body_line) =
-        scan_bare_block_brace(input, cond_start, line_num)?;
+) -> Result<Statement, ParseError> {
+    let first_word = parse_identifier(line_content);
+    let after_keyword = &line_content[first_word.len()..];
 
-    // Check for inline block: `if (cond) { body; }` all on one line
-    let same_line_end = input[body_start..]
-        .find('\n')
-        .unwrap_or(input.len() - body_start);
-    if same_line_end > 0 {
-        let same_line = &input[body_start..body_start + same_line_end];
-        if let Some(close_pos) = same_line.rfind('}') {
-            let body_text = same_line[..close_pos].trim();
-            let condition = flow::parse_condition(&condition_text, ctx.config.version)?;
+    // Find `{` — first in the current line, then in subsequent lines via stream
+    if let Some(brace_offset) = after_keyword.find('{') {
+        // `{` on the same line as the condition
+        let condition_text = after_keyword[..brace_offset].trim().to_string();
+
+        // Check for inline block: `if (cond) { body; }` all on one line
+        let after_brace = after_keyword[brace_offset + 1..].trim();
+        if let Some(close_pos) = after_brace.rfind('}') {
+            let body_text = after_brace[..close_pos].trim();
+            let condition = flow::parse_condition(&condition_text, stream.state.version)?;
             let body_stmts = if body_text.is_empty() {
                 vec![Statement::Empty]
             } else {
-                let body_span = Span::new(line_num, 1, body_start, same_line_end);
-                match parse_command_body(ctx, body_text, body_span) {
+                let body_span = span;
+                match parse_command_body(stream, body_text, body_span) {
                     Ok(stmt) => vec![stmt],
                     Err(_) => vec![Statement::Sql(SqlStatement {
                         span: body_span,
@@ -618,124 +536,158 @@ fn parse_bare_flow_block(
                 }
             };
             let stmt = if is_while {
-                Statement::While(WhileBlock {
-                    span,
-                    condition,
-                    body: body_stmts,
-                })
+                Statement::While(WhileBlock { span, condition, body: body_stmts })
             } else {
-                Statement::If(IfBlock {
-                    span,
-                    condition,
-                    body: body_stmts,
-                })
+                Statement::If(IfBlock { span, condition, body: body_stmts })
             };
-            return Ok((stmt, pos + line_len, line_num + 1));
+            return Ok(stmt);
         }
-    }
 
-    // Body continues on subsequent lines
-    let condition = flow::parse_condition(&condition_text, ctx.config.version)?;
-    let (body, after_body_pos, after_body_line) =
-        parse_statements(ctx, input, body_start, body_line)?;
-    let (end_pos, end_line) = consume_close_brace(input, after_body_pos, after_body_line)?;
-    let stmt = if is_while {
-        Statement::While(WhileBlock {
-            span,
-            condition,
-            body,
-        })
+        // `{` on same line but no `}` — multi-line body
+        let condition = flow::parse_condition(&condition_text, stream.state.version)?;
+        let body = parse_statements_inner(stream)?;
+        consume_close_brace(stream)?;
+        let stmt = if is_while {
+            Statement::While(WhileBlock { span, condition, body })
+        } else {
+            Statement::If(IfBlock { span, condition, body })
+        };
+        Ok(stmt)
     } else {
-        Statement::If(IfBlock {
-            span,
-            condition,
-            body,
-        })
-    };
-    Ok((stmt, end_pos, end_line))
+        // `{` not on this line — scan subsequent lines and collect full condition.
+        // The condition may span multiple lines until `{` is found.
+        let (condition_text, _) = scan_multiline_condition_and_brace(stream, after_keyword.trim())?;
+        let condition = flow::parse_condition(&condition_text, stream.state.version)?;
+        let body = parse_statements_inner(stream)?;
+        consume_close_brace(stream)?;
+        let stmt = if is_while {
+            Statement::While(WhileBlock { span, condition, body })
+        } else {
+            Statement::If(IfBlock { span, condition, body })
+        };
+        Ok(stmt)
+    }
 }
 
-/// Consume the closing `}` and return position after it.
-fn consume_close_brace(
-    input: &str,
-    mut pos: usize,
-    mut line_num: u32,
-) -> Result<(usize, u32), ParseError> {
-    if pos < input.len() && input.as_bytes()[pos] == b'}' {
-        pos += 1;
-        if pos < input.len() && input.as_bytes()[pos] == b'\n' {
-            pos += 1;
-            line_num += 1;
+/// Scan subsequent lines collecting condition text until `{` is found.
+/// Returns (condition_text, true if brace was consumed).
+fn scan_multiline_condition_and_brace(
+    stream: &mut Stream,
+    first_line_condition: &str,
+) -> Result<(String, bool), ParseError> {
+    let mut condition_parts = vec![first_line_condition.to_string()];
+
+    while !stream.input.is_empty() {
+        let remaining = *stream.input;
+        let trimmed = remaining.trim_start();
+
+        if let Some(brace_pos) = trimmed.find('{') {
+            // Found `{` — everything before it on this line is part of condition
+            let before_brace = trimmed[..brace_pos].trim();
+            if !before_brace.is_empty() {
+                condition_parts.push(before_brace.to_string());
+            }
+            // Consume the line up to `{`, then consume `{` and trailing newline
+            let skip_count = remaining.len() - trimmed.len() + brace_pos + 1;
+            // Skip whitespace + content before `{` + `{`
+            for _ in 0..skip_count {
+                if !stream.input.is_empty() {
+                    let _ = winnow::token::any::<_, winnow::error::ContextError>
+                        .parse_next(stream)
+                        .ok();
+                }
+            }
+            // Consume optional newline after `{`
+            let _ = take_while(0.., ['\r', '\n'])
+                .parse_next(stream)
+                .map_err(|e| modal_err_to_parse_err(e, Span::dummy(), "scan_multiline_condition"))?;
+            return Ok((condition_parts.join(" "), true));
         }
+
+        // No `{` on this line — entire line (trimmed) is part of condition
+        if let Ok((line, _)) = peek_line_trimmed(stream) {
+            condition_parts.push(line.to_string());
+        }
+        // Consume this line
+        consume_line(stream)?;
     }
-    Ok((pos, line_num))
+
+    Err(ParseError::UnterminatedFlowControl {
+        kind: "if/while".to_string(),
+        span: Span::dummy(),
+    })
+}
+
+/// Consume the closing `}` and its trailing newline.
+fn consume_close_brace(stream: &mut Stream) -> Result<(), ParseError> {
+    let remaining = *stream.input;
+    if remaining.starts_with('}') {
+        let _ = winnow::token::one_of('}')
+            .parse_next(stream)
+            .map_err(|e| modal_err_to_parse_err(e, Span::dummy(), "consume_close_brace"))?;
+        // Consume optional newline
+        let _ = take_while(0.., ['\r', '\n'])
+            .parse_next(stream)
+            .map_err(|e| modal_err_to_parse_err(e, Span::dummy(), "consume_close_brace"))?;
+    }
+    Ok(())
+}
+
+/// Consume one full line from the stream.
+fn consume_line(stream: &mut Stream) -> Result<(), ParseError> {
+    let _ = take_till(1.., ['\r', '\n'])
+        .parse_next(stream)
+        .map_err(|e| modal_err_to_parse_err(e, Span::dummy(), "consume_line"))?;
+    let _ = take_while(0.., ['\r', '\n'])
+        .parse_next(stream)
+        .map_err(|e| modal_err_to_parse_err(e, Span::dummy(), "consume_line"))?;
+    Ok(())
 }
 
 /// Parse `--write_file filename END_MARKER ... END_MARKER`.
 fn parse_write_file_block(
+    stream: &mut Stream,
     args: &str,
-    input: &str,
-    after_first_line: usize,
-    start_line: u32,
     span: Span,
-) -> Result<(Statement, usize, u32), ParseError> {
+) -> Result<Statement, ParseError> {
     let (filename, end_marker) = parse_file_args(args)?;
-    let (content, new_pos, new_ln) =
-        read_until_end_marker(&end_marker, input, after_first_line, start_line)?;
-    Ok((
-        Statement::WriteFile(crate::ast::commands::WriteFileCmd {
-            span,
-            filename: filename.into(),
-            end_marker,
-            content: content.into(),
-        }),
-        new_pos,
-        new_ln,
-    ))
+    let content = read_until_end_marker(stream, &end_marker)?;
+    Ok(Statement::WriteFile(crate::ast::commands::WriteFileCmd {
+        span,
+        filename: filename.into(),
+        end_marker,
+        content: content.into(),
+    }))
 }
 
 /// Parse `--append_file filename END_MARKER ... END_MARKER`.
 fn parse_append_file_block(
+    stream: &mut Stream,
     args: &str,
-    input: &str,
-    after_first_line: usize,
-    start_line: u32,
     span: Span,
-) -> Result<(Statement, usize, u32), ParseError> {
+) -> Result<Statement, ParseError> {
     let (filename, end_marker) = parse_file_args(args)?;
-    let (content, new_pos, new_ln) =
-        read_until_end_marker(&end_marker, input, after_first_line, start_line)?;
-    Ok((
-        Statement::AppendFile(crate::ast::commands::AppendFileCmd {
-            span,
-            filename: filename.into(),
-            end_marker,
-            content: content.into(),
-        }),
-        new_pos,
-        new_ln,
-    ))
+    let content = read_until_end_marker(stream, &end_marker)?;
+    Ok(Statement::AppendFile(crate::ast::commands::AppendFileCmd {
+        span,
+        filename: filename.into(),
+        end_marker,
+        content: content.into(),
+    }))
 }
 
 /// Parse `--perl [delimiter] ... END_PERL`.
 fn parse_perl_block(
+    stream: &mut Stream,
     end_marker: &str,
-    input: &str,
-    after_first_line: usize,
-    start_line: u32,
     span: Span,
-) -> Result<(PerlBlock, usize, u32), ParseError> {
-    let (content, new_pos, new_ln) =
-        read_until_end_marker(end_marker, input, after_first_line, start_line)?;
-    Ok((
-        PerlBlock {
-            span,
-            end_marker: end_marker.to_string(),
-            content: content.into(),
-        },
-        new_pos,
-        new_ln,
-    ))
+) -> Result<PerlBlock, ParseError> {
+    let content = read_until_end_marker(stream, end_marker)?;
+    Ok(PerlBlock {
+        span,
+        end_marker: end_marker.to_string(),
+        content,
+    })
 }
 
 /// Strip a trailing delimiter from the argument string, respecting quotes.
@@ -750,8 +702,8 @@ fn strip_trailing_delimiter_quoted<'a>(s: &'a str, delimiter: &str) -> &'a str {
     let mut depth = 0u32;
     let mut quote_char: char = '\0';
     let bytes = s.as_bytes();
-    for i in 0..bytes.len() {
-        let c = bytes[i] as char;
+    for &b in bytes {
+        let c = b as char;
         if depth == 0 && (c == '"' || c == '\'' || c == '`') {
             depth = 1;
             quote_char = c;
@@ -821,77 +773,79 @@ fn parse_filename_part_inner<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s
     take_till(1.., [' ', '\t', '\n', '\r']).parse_next(input)
 }
 
-/// Read lines until we find a line that exactly matches the end_marker.
-fn read_until_end_marker(
-    end_marker: &str,
-    input: &str,
-    mut pos: usize,
-    mut line_num: u32,
-) -> Result<(String, usize, u32), ParseError> {
+/// Read lines from the stream until we find a line that exactly matches the end_marker.
+fn read_until_end_marker(stream: &mut Stream, end_marker: &str) -> Result<String, ParseError> {
     let mut content = String::new();
-    let start_line = line_num;
+    let mut start_span = Span::dummy();
+
     loop {
-        if pos >= input.len() {
+        if stream.input.is_empty() {
             return Err(ParseError::UnterminatedBlock {
                 command: "write_file/append_file".to_string(),
                 marker: end_marker.to_string(),
-                span: Span::new(start_line, 1, pos, 0),
+                span: start_span,
             });
         }
-        let (line, _) = read_line(&input[pos..]);
-        let line_end = input[pos..].find('\n').unwrap_or(input[pos..].len());
-        let line_len = if line_end < input[pos..].len() {
-            line_end + 1
-        } else {
-            line_end
-        };
+        // Get original (untrimmed) line for content, but trim for marker comparison
+        let line = read_line_original(stream)
+            .map_err(|e| modal_err_to_parse_err(e, start_span, "read_until_end_marker"))?;
+        if start_span == Span::dummy() {
+            start_span = span_for_current_offset(stream);
+        }
 
         if line.trim() == end_marker {
-            pos += line_len;
-            line_num += 1;
-            return Ok((content, pos, line_num));
+            return Ok(content);
         }
         if !content.is_empty() {
             content.push('\n');
         }
         content.push_str(line);
-        pos += line_len;
-        line_num += 1;
     }
 }
 
 /// Parse delimiter-terminated text: accumulate lines until the delimiter is found.
 fn parse_delimiter_terminated(
-    ctx: &mut ParseContext,
-    input: &str,
-    start_pos: usize,
-    start_line: u32,
-    _first_span: Span,
-) -> Result<(Statement, usize), ParseError> {
+    stream: &mut Stream,
+    span: Span,
+) -> Result<Statement, ParseError> {
     let mut body = String::new();
-    let mut pos = start_pos;
+    let mut start_range: Option<Range<usize>> = None;
+
     loop {
-        let (line, _) = read_line(&input[pos..]);
-        let line_end = input[pos..].find('\n').unwrap_or(input[pos..].len());
-        let line_len = if line_end < input[pos..].len() {
-            line_end + 1
-        } else {
-            line_end
-        };
+        if stream.input.is_empty() {
+            let total_span = start_range
+                .as_ref()
+                .map(|r| range_to_span(stream, r.clone()))
+                .unwrap_or(span);
+            return Ok(Statement::Sql(SqlStatement {
+                span: total_span,
+                sql: body.trim().into(),
+            }));
+        }
+        // Use parse_line to get the original (untrimmed) line content
+        let line = parse_line(stream)
+            .map_err(|e| modal_err_to_parse_err(e, span, "parse_delimiter_terminated"))?;
+        if start_range.is_none() {
+            // Record approximate start — we consumed the line so we use the
+            // span from the caller
+            start_range = Some(span.offset..span.offset + span.len);
+        }
         let trimmed = line.trim_end();
 
-        if let Some(delim_idx) = trimmed.rfind(&ctx.delimiter) {
+        if let Some(delim_idx) = trimmed.rfind(&stream.state.delimiter) {
             let before_delim = &trimmed[..delim_idx];
-            let after_delim = &trimmed[delim_idx + ctx.delimiter.len()..];
+            let after_delim = &trimmed[delim_idx + stream.state.delimiter.len()..];
             let after = after_delim.trim();
             if after.is_empty() || after.starts_with('#') {
                 if !body.is_empty() {
                     body.push('\n');
                 }
                 body.push_str(before_delim);
-                let span = Span::new(start_line, 1, start_pos, pos + line_len - start_pos);
-                let stmt = parse_command_body(ctx, &body, span)?;
-                return Ok((stmt, pos + line_len - start_pos));
+                let total_span = start_range
+                    .as_ref()
+                    .map(|r| range_to_span(stream, r.clone()))
+                    .unwrap_or(span);
+                return parse_command_body(stream, &body, total_span);
             }
         }
 
@@ -899,31 +853,18 @@ fn parse_delimiter_terminated(
             body.push('\n');
         }
         body.push_str(line);
-        pos += line_len;
-
-        if pos >= input.len() {
-            let total_len = pos - start_pos;
-            let span = Span::new(start_line, 1, start_pos, total_len);
-            return Ok((
-                Statement::Sql(SqlStatement {
-                    span,
-                    sql: body.trim().into(),
-                }),
-                total_len,
-            ));
-        }
     }
 }
 
 /// Parse the body of a delimiter-terminated command.
 fn parse_command_body(
-    ctx: &mut ParseContext,
+    stream: &mut Stream,
     body: &str,
     span: Span,
 ) -> Result<Statement, ParseError> {
     let first_word = parse_identifier(body.trim());
     match classify_command(first_word) {
-        CommandKind::Known(name) => command::parse_known_command(ctx, &name, body.trim(), span),
+        CommandKind::Known(name) => command::parse_known_command(stream, &name, body.trim(), span),
         CommandKind::Unknown => Ok(Statement::Sql(SqlStatement {
             span,
             sql: body.into(),
