@@ -1,7 +1,7 @@
 //! Core parsing engine using winnow combinators.
 //!
 //! Entry points:
-//! - [`parse`] — parse a string into a [`MTFile`]
+//! - [`parse`] — parse a string into a `Vec<Statement>`
 //! - [`parse_bytes`] — parse raw bytes (UTF-8 lossy conversion)
 //!
 //! The parser uses `winnow::stream::Stateful<LocatingSlice<&str>, ParserState>`
@@ -19,7 +19,7 @@ use winnow::Parser;
 use winnow::stream::{LocatingSlice, Stateful, Stream as StreamTrait};
 use winnow::token::{take_till, take_while};
 
-use crate::ast::MTFile;
+use crate::ast::statement::*;
 use crate::ast::span::Span;
 use crate::ast::statement::*;
 use crate::error::ParseError;
@@ -34,7 +34,7 @@ pub struct ParserConfig {
 impl Default for ParserConfig {
     fn default() -> Self {
         Self {
-            version: MysqlVersion::Compatible,
+            version: MysqlVersion::MySQL,
         }
     }
 }
@@ -108,21 +108,20 @@ fn span_for_current_offset(_stream: &Stream) -> Span {
 }
 
 /// Parse a complete test file into an AST.
-pub fn parse_bytes(input: &[u8], config: ParserConfig) -> Result<MTFile, ParseError> {
+pub fn parse_bytes(input: &[u8], config: ParserConfig) -> Result<Vec<Statement>, ParseError> {
     let text = String::from_utf8_lossy(input);
     parse(&text, config)
 }
 
 /// Parse a complete test file into an AST.
-pub fn parse(input: &str, config: ParserConfig) -> Result<MTFile, ParseError> {
+pub fn parse(input: &str, config: ParserConfig) -> Result<Vec<Statement>, ParseError> {
     let state = ParserState::new(config.version, input);
     let mut stream = Stream {
         input: LocatingSlice::new(input),
         state,
     };
-    let statements = parse_statements(&mut stream)
-        .map_err(|e| modal_err_to_parse_err(e, Span::dummy(), "parse_statements"))?;
-    Ok(MTFile::new(statements))
+    parse_statements(&mut stream)
+        .map_err(|e| modal_err_to_parse_err(e, Span::dummy(), "parse_statements"))
 }
 
 /// Parse one line from the stream, consuming the line ending.

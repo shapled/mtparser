@@ -8,7 +8,6 @@
 pub mod mut_visitor;
 
 use crate::ast::commands::*;
-use crate::ast::mtfile::MTFile;
 use crate::ast::statement::*;
 
 /// Result of a visit operation.
@@ -24,8 +23,8 @@ pub enum VisitResult {
 
 /// Visitor trait for traversing the AST.
 pub trait Visitor {
-    fn visit_mt_file(&mut self, file: &MTFile) -> VisitResult {
-        for stmt in &file.statements {
+    fn visit_statements(&mut self, statements: &[Statement]) -> VisitResult {
+        for stmt in statements {
             if self.visit_statement(stmt) == VisitResult::Stop {
                 return VisitResult::Stop;
             }

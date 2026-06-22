@@ -4,8 +4,8 @@ use mtparser::parser::{ParserConfig, parse, parse_bytes};
 use mtparser::version::MysqlVersion;
 use mtparser::visitor::{VisitResult, Visitor, mut_visitor::MutVisitor};
 
-fn strict_parse(input: &str) -> MTFile {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+fn strict_parse(input: &str) -> Vec<Statement> {
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     parse(input, config).expect("parse failed")
 }
 
@@ -14,15 +14,15 @@ fn strict_parse(input: &str) -> MTFile {
 #[test]
 fn test_empty_input() {
     let result = strict_parse("");
-    assert!(result.statements.is_empty());
+    assert!(result.is_empty());
 }
 
 #[test]
 fn test_comment_only() {
     let result = strict_parse("# this is a comment\n");
-    assert_eq!(result.statements.len(), 1);
+    assert_eq!(result.len(), 1);
     assert!(
-        matches!(&result.statements[0], Statement::Comment(c) if c.text == " this is a comment")
+        matches!(&result[0], Statement::Comment(c) if c.text == " this is a comment")
     );
 }
 
@@ -30,7 +30,7 @@ fn test_comment_only() {
 fn test_indented_comment() {
     let result = strict_parse("  # indented comment\n");
     assert!(
-        matches!(&result.statements[0], Statement::Comment(c) if c.text == " indented comment")
+        matches!(&result[0], Statement::Comment(c) if c.text == " indented comment")
     );
 }
 
@@ -39,8 +39,8 @@ fn test_indented_comment() {
 #[test]
 fn test_echo_single_line() {
     let result = strict_parse("--echo hello world\n");
-    assert_eq!(result.statements.len(), 1);
-    match &result.statements[0] {
+    assert_eq!(result.len(), 1);
+    match &result[0] {
         Statement::Echo(c) => assert_eq!(c.text.to_raw_string(), "hello world"),
         other => panic!("expected Echo, got {:?}", other),
     }
@@ -51,8 +51,8 @@ fn test_echo_single_line() {
 #[test]
 fn test_let_literal() {
     let result = strict_parse("--let $var = hello\n");
-    assert_eq!(result.statements.len(), 1);
-    match &result.statements[0] {
+    assert_eq!(result.len(), 1);
+    match &result[0] {
         Statement::Let(c) => {
             assert_eq!(c.variable, "var");
             match &c.value {
@@ -67,8 +67,8 @@ fn test_let_literal() {
 #[test]
 fn test_let_query() {
     let result = strict_parse("--let $result = `SELECT 1`\n");
-    assert_eq!(result.statements.len(), 1);
-    match &result.statements[0] {
+    assert_eq!(result.len(), 1);
+    match &result[0] {
         Statement::Let(c) => {
             assert_eq!(c.variable, "result");
             match &c.value {
@@ -85,7 +85,7 @@ fn test_let_query() {
 #[test]
 fn test_inc() {
     let result = strict_parse("--inc $counter\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Inc(c) => assert_eq!(c.variable, "counter"),
         other => panic!("expected Inc, got {:?}", other),
     }
@@ -94,7 +94,7 @@ fn test_inc() {
 #[test]
 fn test_dec() {
     let result = strict_parse("--dec $counter\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Dec(c) => assert_eq!(c.variable, "counter"),
         other => panic!("expected Dec, got {:?}", other),
     }
@@ -105,8 +105,8 @@ fn test_dec() {
 #[test]
 fn test_error_single() {
     let result = strict_parse("--error 1064\nSELECT bad;\n");
-    assert_eq!(result.statements.len(), 2);
-    match &result.statements[0] {
+    assert_eq!(result.len(), 2);
+    match &result[0] {
         Statement::Error(c) => {
             assert_eq!(
                 c.error_codes
@@ -123,7 +123,7 @@ fn test_error_single() {
 #[test]
 fn test_error_multiple() {
     let result = strict_parse("--error 1064, 1146\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Error(c) => {
             assert_eq!(
                 c.error_codes
@@ -142,7 +142,7 @@ fn test_error_multiple() {
 #[test]
 fn test_source() {
     let result = strict_parse("--source include/test.inc\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Source(c) => assert_eq!(c.file.to_raw_string(), "include/test.inc"),
         other => panic!("expected Source, got {:?}", other),
     }
@@ -153,7 +153,7 @@ fn test_source() {
 #[test]
 fn test_skip_with_message() {
     let result = strict_parse("--skip Test requires InnoDB\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Skip(c) => {
             assert_eq!(c.message.as_deref(), Some("Test requires InnoDB"));
         }
@@ -164,7 +164,7 @@ fn test_skip_with_message() {
 #[test]
 fn test_die_with_message() {
     let result = strict_parse("--die fatal error\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Die(c) => {
             assert_eq!(c.message.as_deref(), Some("fatal error"));
         }
@@ -175,7 +175,7 @@ fn test_die_with_message() {
 #[test]
 fn test_exit() {
     let result = strict_parse("--exit\n");
-    assert!(matches!(&result.statements[0], Statement::Exit(_)));
+    assert!(matches!(&result[0], Statement::Exit(_)));
 }
 
 // --- Toggle commands ---
@@ -183,7 +183,7 @@ fn test_exit() {
 #[test]
 fn test_disable_warnings() {
     let result = strict_parse("--disable_warnings\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Toggle(c) => {
             assert!(!c.enabled);
             assert_eq!(c.kind, ToggleKind::Warnings);
@@ -195,7 +195,7 @@ fn test_disable_warnings() {
 #[test]
 fn test_enable_warnings() {
     let result = strict_parse("--enable_warnings\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Toggle(c) => {
             assert!(c.enabled);
             assert_eq!(c.kind, ToggleKind::Warnings);
@@ -207,7 +207,7 @@ fn test_enable_warnings() {
 #[test]
 fn test_disable_query_log() {
     let result = strict_parse("--disable_query_log\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Toggle(c) => {
             assert!(!c.enabled);
             assert_eq!(c.kind, ToggleKind::QueryLog);
@@ -221,7 +221,7 @@ fn test_disable_query_log() {
 #[test]
 fn test_connect() {
     let result = strict_parse("--connect(con1, localhost, root, , test)\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Connect(c) => {
             assert_eq!(
                 c.name.as_ref().map(|m| m.to_raw_string()),
@@ -247,7 +247,7 @@ fn test_connect() {
 #[test]
 fn test_connection_switch() {
     let result = strict_parse("connection default;\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Connection(c) => assert_eq!(c.name.to_raw_string(), "default"),
         other => panic!("expected Connection, got {:?}", other),
     }
@@ -256,7 +256,7 @@ fn test_connection_switch() {
 #[test]
 fn test_disconnect() {
     let result = strict_parse("disconnect con1;\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Disconnect(c) => assert_eq!(c.name.to_raw_string(), "con1"),
         other => panic!("expected Disconnect, got {:?}", other),
     }
@@ -267,7 +267,7 @@ fn test_disconnect() {
 #[test]
 fn test_simple_sql() {
     let result = strict_parse("SELECT 1;\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Sql(s) => assert_eq!(s.sql, "SELECT 1"),
         other => panic!("expected Sql, got {:?}", other),
     }
@@ -276,7 +276,7 @@ fn test_simple_sql() {
 #[test]
 fn test_multi_line_sql() {
     let result = strict_parse("SELECT a, b\n  FROM t1\n  WHERE a > 1;\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Sql(s) => assert_eq!(s.sql, "SELECT a, b\n  FROM t1\n  WHERE a > 1"),
         other => panic!("expected Sql, got {:?}", other),
     }
@@ -290,15 +290,15 @@ fn test_delimiter_change() {
         "SELECT 1;\ndelimiter ||\nCREATE PROCEDURE p1()\nBEGIN\n  SELECT 1;\nEND||\ndelimiter ;\nSELECT 2;\n",
     );
     // Should have 5 statements: SELECT 1, Delimiter, CREATE PROCEDURE, Delimiter, SELECT 2
-    assert_eq!(result.statements.len(), 5);
-    assert!(matches!(&result.statements[0], Statement::Sql(_)));
-    assert!(matches!(&result.statements[1], Statement::Delimiter(_)));
-    assert!(matches!(&result.statements[2], Statement::Sql(_)));
-    assert!(matches!(&result.statements[3], Statement::Delimiter(_)));
-    assert!(matches!(&result.statements[4], Statement::Sql(_)));
+    assert_eq!(result.len(), 5);
+    assert!(matches!(&result[0], Statement::Sql(_)));
+    assert!(matches!(&result[1], Statement::Delimiter(_)));
+    assert!(matches!(&result[2], Statement::Sql(_)));
+    assert!(matches!(&result[3], Statement::Delimiter(_)));
+    assert!(matches!(&result[4], Statement::Sql(_)));
 
     // The CREATE PROCEDURE should include the content between ||
-    if let Statement::Sql(s) = &result.statements[2] {
+    if let Statement::Sql(s) = &result[2] {
         assert!(s.sql.contains("CREATE PROCEDURE"));
         assert!(s.sql.contains("BEGIN"));
         assert!(s.sql.contains("END"));
@@ -311,9 +311,9 @@ fn test_delimiter_change() {
 fn test_if_with_query() {
     let result =
         strict_parse("--echo before\n--if (`SELECT 1 = 1`)\n{\n  --echo inside\n}\n--echo after\n");
-    assert_eq!(result.statements.len(), 3);
-    assert!(matches!(&result.statements[0], Statement::Echo(_))); // before
-    match &result.statements[1] {
+    assert_eq!(result.len(), 3);
+    assert!(matches!(&result[0], Statement::Echo(_))); // before
+    match &result[1] {
         Statement::If(b) => {
             assert!(matches!(&b.condition, Expr::Query(_)));
             assert_eq!(b.body.len(), 1);
@@ -321,13 +321,13 @@ fn test_if_with_query() {
         }
         other => panic!("expected If, got {:?}", other),
     }
-    assert!(matches!(&result.statements[2], Statement::Echo(_))); // after
+    assert!(matches!(&result[2], Statement::Echo(_))); // after
 }
 
 #[test]
 fn test_if_negated_variable() {
     let result = strict_parse("--if (!$undefined)\n{\n  --echo var is not set\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => {
             assert!(matches!(&b.condition, Expr::Negated(_)));
         }
@@ -340,7 +340,7 @@ fn test_if_negated_variable() {
 #[test]
 fn test_while_with_variable() {
     let result = strict_parse("--while ($counter)\n{\n  --dec $counter\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::While(b) => {
             assert!(matches!(&b.condition, Expr::Variable(v) if v.name == "counter"));
             assert_eq!(b.body.len(), 1);
@@ -358,7 +358,7 @@ fn test_basic_commands_fixture() {
         .expect("failed to read fixture");
     let result = strict_parse(&input);
     // Just verify it parses without error and has a reasonable number of statements
-    assert!(result.statements.len() > 10);
+    assert!(result.len() > 10);
 }
 
 #[test]
@@ -366,10 +366,10 @@ fn test_sql_statements_fixture() {
     let input = std::fs::read_to_string("tests/fixtures/sql_statements.test")
         .expect("failed to read fixture");
     let result = strict_parse(&input);
-    assert!(result.statements.len() > 5);
+    assert!(result.len() > 5);
     // All non-empty, non-comment statements should be SQL
     let sql_count = result
-        .statements
+        
         .iter()
         .filter(|s| matches!(s, Statement::Sql(_)))
         .count();
@@ -386,12 +386,12 @@ fn test_flow_control_fixture() {
         .expect("failed to read fixture");
     let result = strict_parse(&input);
     let if_count = result
-        .statements
+        
         .iter()
         .filter(|s| matches!(s, Statement::If(_)))
         .count();
     let while_count = result
-        .statements
+        
         .iter()
         .filter(|s| matches!(s, Statement::While(_)))
         .count();
@@ -413,7 +413,7 @@ fn test_connection_fixture() {
         std::fs::read_to_string("tests/fixtures/connection.test").expect("failed to read fixture");
     let result = strict_parse(&input);
     let connect_count = result
-        .statements
+        
         .iter()
         .filter(|s| matches!(s, Statement::Connect(_)))
         .count();
@@ -430,7 +430,7 @@ fn test_delimiter_fixture() {
         std::fs::read_to_string("tests/fixtures/delimiter.test").expect("failed to read fixture");
     let result = strict_parse(&input);
     let delim_count = result
-        .statements
+        
         .iter()
         .filter(|s| matches!(s, Statement::Delimiter(_)))
         .count();
@@ -448,13 +448,13 @@ fn test_write_file_fixture() {
     let result = strict_parse(&input);
     assert!(
         result
-            .statements
+            
             .iter()
             .any(|s| matches!(s, Statement::WriteFile(_)))
     );
     assert!(
         result
-            .statements
+            
             .iter()
             .any(|s| matches!(s, Statement::AppendFile(_)))
     );
@@ -466,7 +466,7 @@ fn test_write_file_fixture() {
 fn test_unknown_command_treated_as_sql() {
     // Unknown commands are treated as SQL (mysqltest behavior)
     let result = strict_parse("unknown_command arg1 arg2;\n");
-    assert!(matches!(&result.statements[0], Statement::Sql(_)));
+    assert!(matches!(&result[0], Statement::Sql(_)));
 }
 
 // --- Version tests ---
@@ -475,7 +475,7 @@ fn test_unknown_command_treated_as_sql() {
 fn test_v57_system_command() {
     let config = ParserConfig::new(MysqlVersion::V57);
     let result = parse("--system ls -la\n", config).expect("parse failed");
-    assert!(matches!(&result.statements[0], Statement::System(_)));
+    assert!(matches!(&result[0], Statement::System(_)));
 }
 
 #[test]
@@ -490,7 +490,7 @@ fn test_v80_system_command_fails() {
 #[test]
 fn test_mkdir() {
     let result = strict_parse("--mkdir /tmp/test_dir\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Mkdir(c) => assert_eq!(c.dir.to_raw_string(), "/tmp/test_dir"),
         other => panic!("expected Mkdir, got {:?}", other),
     }
@@ -499,7 +499,7 @@ fn test_mkdir() {
 #[test]
 fn test_remove_file() {
     let result = strict_parse("--remove_file /tmp/test.txt\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::RemoveFile(c) => assert_eq!(c.file.to_raw_string(), "/tmp/test.txt"),
         other => panic!("expected RemoveFile, got {:?}", other),
     }
@@ -510,7 +510,7 @@ fn test_remove_file() {
 #[test]
 fn test_replace_column() {
     let result = strict_parse("--replace_column 1 old new\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceColumn(c) => {
             assert_eq!(c.replacements.len(), 1);
             assert_eq!(c.replacements[0].column, "1");
@@ -524,7 +524,7 @@ fn test_replace_column() {
 #[test]
 fn test_replace_regex() {
     let result = strict_parse("--replace_regex /pattern/replacement/i\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "pattern");
             assert_eq!(c.replacement, "replacement");
@@ -539,7 +539,7 @@ fn test_replace_regex() {
 #[test]
 fn test_exec() {
     let result = strict_parse("--exec ls -la /tmp\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Exec(c) => assert_eq!(c.command.to_raw_string(), "ls -la /tmp"),
         other => panic!("expected Exec, got {:?}", other),
     }
@@ -550,7 +550,7 @@ fn test_exec() {
 #[test]
 fn test_sleep() {
     let result = strict_parse("--sleep 2\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Sleep(c) => assert_eq!(c.seconds, "2"),
         other => panic!("expected Sleep, got {:?}", other),
     }
@@ -561,7 +561,7 @@ fn test_sleep() {
 #[test]
 fn test_reap() {
     let result = strict_parse("reap;\n");
-    assert!(matches!(&result.statements[0], Statement::Reap(_)));
+    assert!(matches!(&result[0], Statement::Reap(_)));
 }
 
 // --- Server control ---
@@ -570,7 +570,7 @@ fn test_reap() {
 fn test_shutdown_server() {
     let result = strict_parse("--shutdown_server\n");
     assert!(matches!(
-        &result.statements[0],
+        &result[0],
         Statement::ShutdownServer(_)
     ));
 }
@@ -580,10 +580,10 @@ fn test_shutdown_server() {
 #[test]
 fn test_multiple_empty_lines() {
     let result = strict_parse("\n\n\n");
-    assert_eq!(result.statements.len(), 3);
+    assert_eq!(result.len(), 3);
     assert!(
         result
-            .statements
+            
             .iter()
             .all(|s| matches!(s, Statement::Empty))
     );
@@ -594,7 +594,7 @@ fn test_multiple_empty_lines() {
 #[test]
 fn test_echo_with_variable() {
     let result = strict_parse("--echo counter is $counter\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Echo(c) => {
             assert_eq!(c.text.parts().len(), 2);
             assert!(matches!(&c.text.parts()[0], TextPart::Literal(s) if s == "counter is "));
@@ -608,7 +608,7 @@ fn test_echo_with_variable() {
 #[test]
 fn test_sql_preserves_dollar_var() {
     let result = strict_parse("SELECT $col FROM $table;\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Sql(s) => {
             assert_eq!(s.sql, "SELECT $col FROM $table");
         }
@@ -619,7 +619,7 @@ fn test_sql_preserves_dollar_var() {
 #[test]
 fn test_source_with_variable() {
     let result = strict_parse("--source include/$test.inc\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Source(c) => {
             assert_eq!(c.file.variable_names(), vec!["test"]);
             assert_eq!(c.file.to_raw_string(), "include/$test.inc");
@@ -631,7 +631,7 @@ fn test_source_with_variable() {
 #[test]
 fn test_echo_escaped_dollar() {
     let result = strict_parse("--echo price is \\$10\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Echo(c) => {
             assert!(c.text.is_literal());
             assert_eq!(c.text.to_raw_string(), "price is $10");
@@ -741,10 +741,10 @@ impl Visitor for VarCollector {
 fn test_visitor_basic_traversal() {
     let input = "--echo hello\n--exec ls\nSELECT 1;\n";
     let result = strict_parse(input);
-    assert_eq!(result.statements.len(), 3);
+    assert_eq!(result.len(), 3);
 
     let mut collector = VarCollector::new();
-    collector.visit_mt_file(&result);
+    collector.visit_statements(&result);
     // echo hello has no variables, exec ls has no variables
     assert!(collector.variables.is_empty());
 }
@@ -757,10 +757,10 @@ fn test_visitor_collects_variables() {
 --exec ./script --user=$user
 SELECT $unresolved;\n";
     let result = strict_parse(input);
-    assert_eq!(result.statements.len(), 4);
+    assert_eq!(result.len(), 4);
 
     let mut collector = VarCollector::new();
-    collector.visit_mt_file(&result);
+    collector.visit_statements(&result);
     // echo: $host, $port; exec: $user
     // The SQL fallback does NOT parse variables (raw SQL)
     assert_eq!(collector.variables, vec!["host", "port", "user"]);
@@ -779,7 +779,7 @@ fn test_visitor_if_block_traversal() {
     let result = strict_parse(input);
 
     let mut collector = VarCollector::new();
-    collector.visit_mt_file(&result);
+    collector.visit_statements(&result);
     // exec prog $x inside the if block
     assert!(collector.variables.contains(&"x".to_string()));
 }
@@ -800,7 +800,7 @@ fn test_visitor_stop_control() {
     }
 
     let mut visitor = StopAfterFirst;
-    visitor.visit_mt_file(&result);
+    visitor.visit_statements(&result);
     // Only first echo should have been visited
 }
 
@@ -811,7 +811,7 @@ fn test_visitor_connect_variables() {
     let result = strict_parse(input);
 
     let mut collector = VarCollector::new();
-    collector.visit_mt_file(&result);
+    collector.visit_statements(&result);
     assert_eq!(collector.variables, vec!["host", "user", "pass", "db"]);
 }
 
@@ -827,7 +827,7 @@ fn test_visitor_while_block_traversal() {
     let result = strict_parse(input);
 
     let mut collector = VarCollector::new();
-    collector.visit_mt_file(&result);
+    collector.visit_statements(&result);
     // echo inside while: $i
     assert!(collector.variables.contains(&"i".to_string()));
 }
@@ -842,7 +842,7 @@ fn test_visitor_mixed_commands() {
     let result = strict_parse(input);
 
     let mut collector = VarCollector::new();
-    collector.visit_mt_file(&result);
+    collector.visit_statements(&result);
     assert!(collector.variables.contains(&"tmpdir".to_string()));
     assert!(collector.variables.contains(&"test".to_string()));
     assert!(collector.variables.contains(&"MYSQLD".to_string()));
@@ -863,7 +863,7 @@ fn test_visitor_no_double_count_in_nested_blocks() {
     let result = strict_parse(input);
 
     let mut collector = VarCollector::new();
-    collector.visit_mt_file(&result);
+    collector.visit_statements(&result);
     // $a appears twice (top-level + inside if), $b once
     let a_count = collector.variables.iter().filter(|v| *v == "a").count();
     let b_count = collector.variables.iter().filter(|v| *v == "b").count();
@@ -873,7 +873,7 @@ fn test_visitor_no_double_count_in_nested_blocks() {
 
 // --- Condition expression tests (flow.rs coverage) ---
 
-fn parse_mariadb(input: &str) -> MTFile {
+fn parse_mariadb(input: &str) -> Vec<Statement> {
     let config = ParserConfig::new(MysqlVersion::MariaDB);
     parse(input, config).expect("parse failed")
 }
@@ -881,7 +881,7 @@ fn parse_mariadb(input: &str) -> MTFile {
 #[test]
 fn test_condition_integer() {
     let result = strict_parse("--if (0)\n{\n  --echo zero\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => assert!(matches!(&b.condition, Expr::Integer(0))),
         other => panic!("expected If, got {:?}", other),
     }
@@ -890,7 +890,7 @@ fn test_condition_integer() {
 #[test]
 fn test_condition_comparison_integer_rhs() {
     let result = strict_parse("--if ($x == 1)\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::Comparison {
                 operator, right, ..
@@ -907,7 +907,7 @@ fn test_condition_comparison_integer_rhs() {
 #[test]
 fn test_condition_comparison_string_rhs() {
     let result = strict_parse("--if ($x == \"hello\")\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::Comparison { right, .. } => {
                 assert!(matches!(right.as_ref(), ComparisonRhs::String(s) if s == "hello"));
@@ -921,7 +921,7 @@ fn test_condition_comparison_string_rhs() {
 #[test]
 fn test_condition_comparison_variable_rhs() {
     let result = strict_parse("--if ($x == $y)\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::Comparison { right, .. } => {
                 assert!(matches!(right.as_ref(), ComparisonRhs::Variable(v) if v.name == "y"));
@@ -944,7 +944,7 @@ fn test_condition_comparison_all_ops() {
     for (op_str, expected_op) in ops {
         let input = format!("--if ($x {} 0)\n{{\n}}\n", op_str);
         let result = strict_parse(&input);
-        match &result.statements[0] {
+        match &result[0] {
             Statement::If(b) => match &b.condition {
                 Expr::Comparison { operator, .. } => assert_eq!(*operator, expected_op),
                 other => panic!("op {}: expected Comparison, got {:?}", op_str, other),
@@ -956,14 +956,14 @@ fn test_condition_comparison_all_ops() {
 
 #[test]
 fn test_condition_empty_error() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--if ()\n{\n}\n", config);
     assert!(result.is_err());
 }
 
 #[test]
 fn test_condition_invalid_error() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--if (???)\n{\n}\n", config);
     assert!(result.is_err());
 }
@@ -971,7 +971,7 @@ fn test_condition_invalid_error() {
 #[test]
 fn test_condition_negated_integer() {
     let result = strict_parse("--if (!0)\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::Negated(inner) => assert!(matches!(inner.as_ref(), Expr::Integer(0))),
             other => panic!("expected Negated, got {:?}", other),
@@ -983,7 +983,7 @@ fn test_condition_negated_integer() {
 #[test]
 fn test_condition_negated_query() {
     let result = strict_parse("--if (!`SELECT 0`)\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::Negated(inner) => assert!(matches!(inner.as_ref(), Expr::Query(_))),
             other => panic!("expected Negated, got {:?}", other),
@@ -997,7 +997,7 @@ fn test_condition_negated_query() {
 #[test]
 fn test_mariadb_dollar_paren() {
     let result = parse_mariadb("--if ($(5 == 5))\n{\n  --echo ok\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::MariaDBClosure { expression, .. } => assert_eq!(expression, "5 == 5"),
             other => panic!("expected MariaDBClosure, got {:?}", other),
@@ -1009,7 +1009,7 @@ fn test_mariadb_dollar_paren() {
 #[test]
 fn test_mariadb_dollar_paren_variable() {
     let result = parse_mariadb("--if ($($x > 0))\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::MariaDBClosure { expression, .. } => assert_eq!(expression, "$x > 0"),
             other => panic!("expected MariaDBClosure, got {:?}", other),
@@ -1021,7 +1021,7 @@ fn test_mariadb_dollar_paren_variable() {
 #[test]
 fn test_mariadb_and_operator() {
     let result = parse_mariadb("--if (0 && $have_debug)\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::MariaDBLogical { expression, .. } => assert_eq!(expression, "0 && $have_debug"),
             other => panic!("expected MariaDBLogical, got {:?}", other),
@@ -1033,7 +1033,7 @@ fn test_mariadb_and_operator() {
 #[test]
 fn test_mariadb_or_operator() {
     let result = parse_mariadb("--if ($x || $y)\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::MariaDBLogical { expression, .. } => assert_eq!(expression, "$x || $y"),
             other => panic!("expected MariaDBLogical, got {:?}", other),
@@ -1045,7 +1045,7 @@ fn test_mariadb_or_operator() {
 #[test]
 fn test_mariadb_not_parsed_in_mysql_mode() {
     // $() should NOT be parsed in Compatible (MySQL) mode
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--if ($(5 == 5))\n{\n}\n", config);
     // Should fail because $( is not a recognized expression start in MySQL mode
     assert!(result.is_err());
@@ -1056,7 +1056,7 @@ fn test_mariadb_not_parsed_in_mysql_mode() {
 #[test]
 fn test_delimiter_terminated_connect() {
     let result = strict_parse("connect(con1, localhost, root, , test);\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Connect(c) => {
             assert_eq!(
                 c.name.as_ref().map(|n| n.to_raw_string()),
@@ -1070,7 +1070,7 @@ fn test_delimiter_terminated_connect() {
 #[test]
 fn test_delimiter_terminated_disconnect() {
     let result = strict_parse("disconnect con1;\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Disconnect(c) => assert_eq!(c.name.to_raw_string(), "con1"),
         other => panic!("expected Disconnect, got {:?}", other),
     }
@@ -1079,7 +1079,7 @@ fn test_delimiter_terminated_disconnect() {
 #[test]
 fn test_delimiter_terminated_connection() {
     let result = strict_parse("connection con1;\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Connection(c) => assert_eq!(c.name.to_raw_string(), "con1"),
         other => panic!("expected Connection, got {:?}", other),
     }
@@ -1088,14 +1088,14 @@ fn test_delimiter_terminated_connection() {
 #[test]
 fn test_delimiter_terminated_reap() {
     let result = strict_parse("reap;\n");
-    assert!(matches!(&result.statements[0], Statement::Reap(_)));
+    assert!(matches!(&result[0], Statement::Reap(_)));
 }
 
 #[test]
 fn test_delimiter_terminated_shutdown() {
     let result = strict_parse("shutdown_server 10000;\n");
     assert!(matches!(
-        &result.statements[0],
+        &result[0],
         Statement::ShutdownServer(_)
     ));
 }
@@ -1103,10 +1103,10 @@ fn test_delimiter_terminated_shutdown() {
 #[test]
 fn test_delimiter_terminated_with_comment() {
     let result = strict_parse("--error 1064\nSELECT bad;\n# a comment\n");
-    assert_eq!(result.statements.len(), 3);
-    assert!(matches!(&result.statements[0], Statement::Error(_)));
-    assert!(matches!(&result.statements[1], Statement::Sql(_)));
-    assert!(matches!(&result.statements[2], Statement::Comment(_)));
+    assert_eq!(result.len(), 3);
+    assert!(matches!(&result[0], Statement::Error(_)));
+    assert!(matches!(&result[1], Statement::Sql(_)));
+    assert!(matches!(&result[2], Statement::Comment(_)));
 }
 
 // --- write_file / append_file block parsing (mod.rs coverage) ---
@@ -1114,7 +1114,7 @@ fn test_delimiter_terminated_with_comment() {
 #[test]
 fn test_write_file_with_content() {
     let result = strict_parse("--write_file /tmp/test.txt\nline1\nline2\nEOF\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::WriteFile(c) => {
             assert_eq!(c.filename.to_raw_string(), "/tmp/test.txt");
             assert_eq!(c.end_marker, "EOF");
@@ -1127,7 +1127,7 @@ fn test_write_file_with_content() {
 #[test]
 fn test_append_file_with_content() {
     let result = strict_parse("--append_file /tmp/test.txt\nextra\nEOF\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::AppendFile(c) => {
             assert_eq!(c.filename.to_raw_string(), "/tmp/test.txt");
             assert_eq!(c.content.to_raw_string(), "extra");
@@ -1139,7 +1139,7 @@ fn test_append_file_with_content() {
 #[test]
 fn test_write_file_custom_marker() {
     let result = strict_parse("--write_file /tmp/test.txt MY_EOF\ncontent\nMY_EOF\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::WriteFile(c) => {
             assert_eq!(c.end_marker, "MY_EOF");
             assert_eq!(c.content.to_raw_string(), "content");
@@ -1151,7 +1151,7 @@ fn test_write_file_custom_marker() {
 #[test]
 fn test_perl_block() {
     let result = strict_parse("--perl\nprint \"hello\";\nEOF\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Perl(b) => {
             assert!(b.content.contains("print"));
             assert_eq!(b.end_marker, "EOF");
@@ -1166,7 +1166,7 @@ fn test_write_file_quoted_filename() {
     // Note: parse_file_args splits on space, so quoted paths with spaces
     // need to not contain spaces, or the parser needs enhancement
     let result = strict_parse("--write_file \"/tmp/myfile.txt\"\ncontent\nEOF\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::WriteFile(c) => {
             assert_eq!(c.filename.to_raw_string(), "/tmp/myfile.txt");
         }
@@ -1179,7 +1179,7 @@ fn test_write_file_quoted_filename_with_semicolon() {
     // Filename with semicolon inside quotes - the strip_trailing_delimiter_quoted
     // should handle this, but parse_file_args splits on space which is separate
     let result = strict_parse("--write_file \"/tmp/myfile;test.qp\"\nfoo\nEOF\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::WriteFile(c) => {
             assert_eq!(c.filename.to_raw_string(), "/tmp/myfile;test.qp");
         }
@@ -1190,7 +1190,7 @@ fn test_write_file_quoted_filename_with_semicolon() {
 #[test]
 fn test_bare_if_block() {
     let result = strict_parse("if ($x) {\n  --echo inside\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => {
             assert!(matches!(&b.condition, Expr::Variable(v) if v.name == "x"));
             assert_eq!(b.body.len(), 1);
@@ -1202,7 +1202,7 @@ fn test_bare_if_block() {
 #[test]
 fn test_bare_while_block() {
     let result = strict_parse("while ($i) {\n  --dec $i;\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::While(b) => {
             assert!(matches!(&b.condition, Expr::Variable(v) if v.name == "i"));
             assert_eq!(b.body.len(), 1);
@@ -1214,7 +1214,7 @@ fn test_bare_while_block() {
 #[test]
 fn test_inline_if_block() {
     let result = strict_parse("if (1) { --echo ok; }\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => {
             assert!(matches!(&b.condition, Expr::Integer(1)));
             assert_eq!(b.body.len(), 1);
@@ -1226,7 +1226,7 @@ fn test_inline_if_block() {
 #[test]
 fn test_inline_while_block() {
     let result = strict_parse("while ($i) { --dec $i; }\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::While(b) => {
             assert_eq!(b.body.len(), 1);
         }
@@ -1239,7 +1239,7 @@ fn test_inline_while_block() {
 #[test]
 fn test_source_quoted() {
     let result = strict_parse("--source \"include/test.inc\"\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Source(c) => assert_eq!(c.file.to_raw_string(), "include/test.inc"),
         other => panic!("expected Source, got {:?}", other),
     }
@@ -1248,7 +1248,7 @@ fn test_source_quoted() {
 #[test]
 fn test_mkdir_quoted() {
     let result = strict_parse("--mkdir \"/tmp/new dir\"\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Mkdir(c) => assert_eq!(c.dir.to_raw_string(), "/tmp/new dir"),
         other => panic!("expected Mkdir, got {:?}", other),
     }
@@ -1257,7 +1257,7 @@ fn test_mkdir_quoted() {
 #[test]
 fn test_rmdir() {
     let result = strict_parse("--rmdir /tmp/olddir\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Rmdir(c) => assert_eq!(c.dir.to_raw_string(), "/tmp/olddir"),
         other => panic!("expected Rmdir, got {:?}", other),
     }
@@ -1266,7 +1266,7 @@ fn test_rmdir() {
 #[test]
 fn test_cat_file() {
     let result = strict_parse("--cat_file /tmp/out.txt\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::CatFile(c) => assert_eq!(c.file.to_raw_string(), "/tmp/out.txt"),
         other => panic!("expected CatFile, got {:?}", other),
     }
@@ -1275,7 +1275,7 @@ fn test_cat_file() {
 #[test]
 fn test_file_exists() {
     let result = strict_parse("--file_exists /tmp/test.txt\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::FileExists(c) => assert_eq!(c.file.to_raw_string(), "/tmp/test.txt"),
         other => panic!("expected FileExists, got {:?}", other),
     }
@@ -1284,7 +1284,7 @@ fn test_file_exists() {
 #[test]
 fn test_copy_file() {
     let result = strict_parse("--copy_file /tmp/a.txt /tmp/b.txt\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::CopyFile(c) => {
             assert_eq!(c.source.to_raw_string(), "/tmp/a.txt");
             assert_eq!(c.dest.to_raw_string(), "/tmp/b.txt");
@@ -1296,7 +1296,7 @@ fn test_copy_file() {
 #[test]
 fn test_move_file() {
     let result = strict_parse("--move_file /tmp/a.txt /tmp/b.txt\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::MoveFile(c) => {
             assert_eq!(c.source.to_raw_string(), "/tmp/a.txt");
             assert_eq!(c.dest.to_raw_string(), "/tmp/b.txt");
@@ -1308,7 +1308,7 @@ fn test_move_file() {
 #[test]
 fn test_diff_files() {
     let result = strict_parse("--diff_files /tmp/a.txt /tmp/b.txt\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::DiffFiles(c) => {
             assert_eq!(c.file1.to_raw_string(), "/tmp/a.txt");
             assert_eq!(c.file2.to_raw_string(), "/tmp/b.txt");
@@ -1320,7 +1320,7 @@ fn test_diff_files() {
 #[test]
 fn test_list_files() {
     let result = strict_parse("--list_files /tmp *.txt\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ListFiles(c) => {
             assert_eq!(
                 c.dir.as_ref().map(|t| t.to_raw_string()),
@@ -1338,7 +1338,7 @@ fn test_list_files() {
 #[test]
 fn test_list_files_with_quoted_dir() {
     let result = strict_parse("--list_files \"/tmp my dir\" *.txt\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ListFiles(c) => {
             // strip_quotes removes quotes, but split_whitespace splits on the inner space
             // This tests the current parsing behavior
@@ -1351,7 +1351,7 @@ fn test_list_files_with_quoted_dir() {
 #[test]
 fn test_chmod() {
     let result = strict_parse("--chmod 644 /tmp/file.txt\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Chmod(c) => {
             assert_eq!(c.mode, "644");
             assert_eq!(c.file.to_raw_string(), "/tmp/file.txt");
@@ -1363,7 +1363,7 @@ fn test_chmod() {
 #[test]
 fn test_character_set() {
     let result = strict_parse("--character_set utf8\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::CharacterSet(c) => assert_eq!(c.charset, "utf8"),
         other => panic!("expected CharacterSet, got {:?}", other),
     }
@@ -1373,14 +1373,14 @@ fn test_character_set() {
 fn test_system_command() {
     let config = ParserConfig::new(MysqlVersion::V57);
     let result = parse("--system ls\n", config).expect("parse failed");
-    assert!(matches!(&result.statements[0], Statement::System(_)));
+    assert!(matches!(&result[0], Statement::System(_)));
 }
 
 #[test]
 fn test_require_command() {
     let config = ParserConfig::new(MysqlVersion::V57);
     let result = parse("--require some_file.inc\n", config).expect("parse failed");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Require(c) => assert_eq!(c.file.to_raw_string(), "some_file.inc"),
         other => panic!("expected Require, got {:?}", other),
     }
@@ -1390,14 +1390,14 @@ fn test_require_command() {
 fn test_real_sleep_command() {
     let config = ParserConfig::new(MysqlVersion::V57);
     let result = parse("--real_sleep 0.5\n", config).expect("parse failed");
-    assert!(matches!(&result.statements[0], Statement::RealSleep(_)));
+    assert!(matches!(&result[0], Statement::RealSleep(_)));
 }
 
 #[test]
 fn test_lowercase_result() {
     let result = strict_parse("--lowercase_result\n");
     assert!(matches!(
-        &result.statements[0],
+        &result[0],
         Statement::LowercaseResult(_)
     ));
 }
@@ -1405,7 +1405,7 @@ fn test_lowercase_result() {
 #[test]
 fn test_toggle_once() {
     let result = strict_parse("--disable_warnings ONCE\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Toggle(c) => {
             assert!(!c.enabled);
             assert!(c.once);
@@ -1417,38 +1417,38 @@ fn test_toggle_once() {
 #[test]
 fn test_query_command() {
     let result = strict_parse("--query SELECT 1;\n");
-    assert!(matches!(&result.statements[0], Statement::Query(_)));
+    assert!(matches!(&result[0], Statement::Query(_)));
 }
 
 #[test]
 fn test_eval_command() {
     let result = strict_parse("--eval SELECT $x;\n");
-    assert!(matches!(&result.statements[0], Statement::Eval(_)));
+    assert!(matches!(&result[0], Statement::Eval(_)));
 }
 
 #[test]
 fn test_send_quit() {
     let result = strict_parse("--send_quit\n");
-    assert!(matches!(&result.statements[0], Statement::SendQuit(_)));
+    assert!(matches!(&result[0], Statement::SendQuit(_)));
 }
 
 #[test]
 fn test_send_shutdown() {
     let result = strict_parse("--send_shutdown\n");
-    assert!(matches!(&result.statements[0], Statement::SendShutdown(_)));
+    assert!(matches!(&result[0], Statement::SendShutdown(_)));
 }
 
 #[test]
 fn test_execw() {
     let result = strict_parse("--execw ls\n");
-    assert!(matches!(&result.statements[0], Statement::Execw(_)));
+    assert!(matches!(&result[0], Statement::Execw(_)));
 }
 
 #[test]
 fn test_exec_in_background() {
     let result = strict_parse("--exec_in_background sleep 5\n");
     assert!(matches!(
-        &result.statements[0],
+        &result[0],
         Statement::ExecInBackground(_)
     ));
 }
@@ -1457,7 +1457,7 @@ fn test_exec_in_background() {
 fn test_horizontal_results() {
     let result = strict_parse("--horizontal_results\n");
     assert!(matches!(
-        &result.statements[0],
+        &result[0],
         Statement::HorizontalResults(_)
     ));
 }
@@ -1466,7 +1466,7 @@ fn test_horizontal_results() {
 fn test_vertical_results() {
     let result = strict_parse("--vertical_results\n");
     assert!(matches!(
-        &result.statements[0],
+        &result[0],
         Statement::VerticalResults(_)
     ));
 }
@@ -1474,14 +1474,14 @@ fn test_vertical_results() {
 #[test]
 fn test_sorted_result() {
     let result = strict_parse("--sorted_result\n");
-    assert!(matches!(&result.statements[0], Statement::SortedResult(_)));
+    assert!(matches!(&result[0], Statement::SortedResult(_)));
 }
 
 #[test]
 fn test_partially_sorted_result() {
     let result = strict_parse("--partially_sorted_result\n");
     assert!(matches!(
-        &result.statements[0],
+        &result[0],
         Statement::PartiallySortedResult(_)
     ));
 }
@@ -1489,14 +1489,14 @@ fn test_partially_sorted_result() {
 #[test]
 fn test_replace_result() {
     let result = strict_parse("--replace_result 1 # 2\n");
-    assert!(matches!(&result.statements[0], Statement::ReplaceResult(_)));
+    assert!(matches!(&result[0], Statement::ReplaceResult(_)));
 }
 
 #[test]
 fn test_replace_numeric_round() {
     let result = strict_parse("--replace_numeric_round 2\n");
     assert!(matches!(
-        &result.statements[0],
+        &result[0],
         Statement::ReplaceNumericRound(_)
     ));
 }
@@ -1505,7 +1505,7 @@ fn test_replace_numeric_round() {
 fn test_remove_files_wildcard() {
     let result = strict_parse("--remove_files_wildcard /tmp *.tmp\n");
     assert!(matches!(
-        &result.statements[0],
+        &result[0],
         Statement::RemoveFilesWildcard(_)
     ));
 }
@@ -1514,7 +1514,7 @@ fn test_remove_files_wildcard() {
 fn test_copy_files_wildcard() {
     let result = strict_parse("--copy_files_wildcard /tmp/src /tmp/dst *.txt\n");
     assert!(matches!(
-        &result.statements[0],
+        &result[0],
         Statement::CopyFilesWildcard(_)
     ));
 }
@@ -1523,7 +1523,7 @@ fn test_copy_files_wildcard() {
 fn test_sync_slave_with_master() {
     let result = strict_parse("--sync_slave_with_master\n");
     assert!(matches!(
-        &result.statements[0],
+        &result[0],
         Statement::SyncSlaveWithMaster(_)
     ));
 }
@@ -1562,7 +1562,7 @@ fn test_toggle_all_variants() {
     ];
     for (cmd, kind, enabled) in toggles {
         let result = strict_parse(&format!("--{}\n", cmd));
-        match &result.statements[0] {
+        match &result[0] {
             Statement::Toggle(c) => {
                 assert_eq!(c.kind, kind, "{}: wrong kind", cmd);
                 assert_eq!(c.enabled, enabled, "{}: wrong enabled", cmd);
@@ -1576,14 +1576,14 @@ fn test_toggle_all_variants() {
 #[test]
 fn test_change_user() {
     let result = strict_parse("--change_user user\n");
-    assert!(matches!(&result.statements[0], Statement::ChangeUser(_)));
+    assert!(matches!(&result[0], Statement::ChangeUser(_)));
 }
 
 #[test]
 fn test_reset_connection() {
     let result = strict_parse("--reset_connection\n");
     assert!(matches!(
-        &result.statements[0],
+        &result[0],
         Statement::ResetConnection(_)
     ));
 }
@@ -1591,7 +1591,7 @@ fn test_reset_connection() {
 #[test]
 fn test_send_eval() {
     let result = strict_parse("--send_eval SELECT 1;\n");
-    assert!(matches!(&result.statements[0], Statement::SendEval(_)));
+    assert!(matches!(&result[0], Statement::SendEval(_)));
 }
 
 // --- Version tests (version.rs coverage) ---
@@ -1601,7 +1601,7 @@ fn test_mariadb_is_mariadb() {
     assert!(MysqlVersion::MariaDB.is_mariadb());
     assert!(MysqlVersion::MariaDB_118.is_mariadb());
     assert!(MysqlVersion::MariaDB_123.is_mariadb());
-    assert!(!MysqlVersion::Compatible.is_mariadb());
+    assert!(!MysqlVersion::MySQL.is_mariadb());
     assert!(!MysqlVersion::V80.is_mariadb());
     assert!(!MysqlVersion::V57.is_mariadb());
 }
@@ -1621,7 +1621,7 @@ fn test_mariadb_has_assert() {
 
 #[test]
 fn test_compatible_plus_mariadb() {
-    let v = MysqlVersion::Compatible | MysqlVersion::MariaDB;
+    let v = MysqlVersion::MySQL | MysqlVersion::MariaDB;
     assert!(v.is_mariadb());
     assert!(v.has_command("require"));
     assert!(v.has_command("assert"));
@@ -1659,7 +1659,7 @@ fn test_visitor_visit_statement() {
         }
     }
     let mut v = CountVisitor { count: 0 };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert_eq!(v.count, 2);
 }
 
@@ -1676,25 +1676,25 @@ fn test_visitor_leave_statement() {
         }
     }
     let mut v = LeaveVisitor { count: 0 };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert_eq!(v.count, 2);
 }
 
 #[test]
-fn test_visitor_visit_mt_file() {
+fn test_visitor_visit_statements() {
     let input = "--echo hello\n";
     let result = strict_parse(input);
     struct FileVisitor {
         visited: bool,
     }
     impl Visitor for FileVisitor {
-        fn visit_mt_file(&mut self, _file: &MTFile) -> VisitResult {
+        fn visit_statements(&mut self, _file: &[Statement]) -> VisitResult {
             self.visited = true;
             VisitResult::Continue
         }
     }
     let mut v = FileVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1712,7 +1712,7 @@ fn test_visitor_visit_if() {
         }
     }
     let mut v = IfVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1730,7 +1730,7 @@ fn test_visitor_visit_while() {
         }
     }
     let mut v = WhileVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1747,7 +1747,7 @@ fn test_visitor_visit_let() {
         }
     }
     let mut v = LetVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1764,7 +1764,7 @@ fn test_visitor_visit_error() {
         }
     }
     let mut v = ErrorVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1781,7 +1781,7 @@ fn test_visitor_visit_sql() {
         }
     }
     let mut v = SqlVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1798,7 +1798,7 @@ fn test_visitor_visit_delimiter() {
         }
     }
     let mut v = DelimVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1815,7 +1815,7 @@ fn test_visitor_visit_comment() {
         }
     }
     let mut v = CommentVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1832,7 +1832,7 @@ fn test_visitor_visit_connect() {
         }
     }
     let mut v = ConnectVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1849,7 +1849,7 @@ fn test_visitor_visit_disconnect() {
         }
     }
     let mut v = DisVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1866,7 +1866,7 @@ fn test_visitor_visit_connection_cmd() {
         }
     }
     let mut v = ConnVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1883,7 +1883,7 @@ fn test_visitor_visit_skip() {
         }
     }
     let mut v = SkipVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1900,7 +1900,7 @@ fn test_visitor_visit_die() {
         }
     }
     let mut v = DieVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1917,7 +1917,7 @@ fn test_visitor_visit_exit() {
         }
     }
     let mut v = ExitVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1934,7 +1934,7 @@ fn test_visitor_visit_inc() {
         }
     }
     let mut v = IncVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1951,7 +1951,7 @@ fn test_visitor_visit_dec() {
         }
     }
     let mut v = DecVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1968,7 +1968,7 @@ fn test_visitor_visit_sleep() {
         }
     }
     let mut v = SleepVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -1985,7 +1985,7 @@ fn test_visitor_visit_execw() {
         }
     }
     let mut v = ExecwVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -2002,7 +2002,7 @@ fn test_visitor_visit_toggle() {
         }
     }
     let mut v = ToggleVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -2019,7 +2019,7 @@ fn test_visitor_visit_source() {
         }
     }
     let mut v = SrcVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -2036,7 +2036,7 @@ fn test_visitor_visit_write_file() {
         }
     }
     let mut v = WfVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -2053,7 +2053,7 @@ fn test_visitor_visit_mkdir() {
         }
     }
     let mut v = MkdirVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -2070,15 +2070,15 @@ fn test_visitor_visit_remove_file() {
         }
     }
     let mut v = RmVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
 #[test]
 fn test_visitor_visit_empty() {
     let result = strict_parse("\n");
-    assert!(matches!(&result.statements[0], Statement::Empty));
-    // Empty statements don't trigger any visitor hooks, but visit_mt_file and visit_statement cover them
+    assert!(matches!(&result[0], Statement::Empty));
+    // Empty statements don't trigger any visitor hooks, but visit_statements and visit_statement cover them
     struct CountVisitor {
         count: usize,
     }
@@ -2089,7 +2089,7 @@ fn test_visitor_visit_empty() {
         }
     }
     let mut v = CountVisitor { count: 0 };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert_eq!(v.count, 1); // Empty is counted as a statement
 }
 
@@ -2098,15 +2098,15 @@ fn test_visitor_visit_empty() {
 #[test]
 fn test_mariadb_parse_basic() {
     let result = parse_mariadb("--echo hello\nSELECT 1;\n");
-    assert_eq!(result.statements.len(), 2);
-    assert!(matches!(&result.statements[0], Statement::Echo(_)));
-    assert!(matches!(&result.statements[1], Statement::Sql(_)));
+    assert_eq!(result.len(), 2);
+    assert!(matches!(&result[0], Statement::Echo(_)));
+    assert!(matches!(&result[1], Statement::Sql(_)));
 }
 
 #[test]
 fn test_mariadb_write_file_block() {
     let result = parse_mariadb("--write_file \"/tmp/testfile\"\nfoo\nEOF\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::WriteFile(c) => {
             assert_eq!(c.filename.to_raw_string(), "/tmp/testfile");
         }
@@ -2117,14 +2117,14 @@ fn test_mariadb_write_file_block() {
 #[test]
 fn test_multi_line_delimiter_terminated() {
     let result = strict_parse("--let $x = \n  a\n  b\n;\nSELECT 1;\n");
-    assert!(result.statements.len() >= 2);
-    assert!(matches!(&result.statements[0], Statement::Let(_)));
+    assert!(result.len() >= 2);
+    assert!(matches!(&result[0], Statement::Let(_)));
 }
 
 #[test]
 fn test_bare_perl_block() {
     let result = strict_parse("perl\nprint 1;\nEOF\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Perl(b) => {
             assert!(b.content.contains("print 1"));
             assert_eq!(b.end_marker, "EOF");
@@ -2136,7 +2136,7 @@ fn test_bare_perl_block() {
 #[test]
 fn test_unknown_command_as_sql() {
     let result = strict_parse("random_command arg1 arg2;\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Sql(s) => assert!(s.sql.contains("random_command")),
         other => panic!("expected Sql, got {:?}", other),
     }
@@ -2153,7 +2153,7 @@ fn test_double_dash_unknown_command_as_sql() {
 #[test]
 fn test_skip_no_message() {
     let result = strict_parse("--skip\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Skip(c) => assert!(c.message.is_none()),
         other => panic!("expected Skip, got {:?}", other),
     }
@@ -2162,7 +2162,7 @@ fn test_skip_no_message() {
 #[test]
 fn test_die_no_message() {
     let result = strict_parse("--die\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Die(c) => assert!(c.message.is_none()),
         other => panic!("expected Die, got {:?}", other),
     }
@@ -2171,13 +2171,13 @@ fn test_die_no_message() {
 #[test]
 fn test_send_command() {
     let result = strict_parse("--send SELECT 1;\n");
-    assert!(matches!(&result.statements[0], Statement::Send(_)));
+    assert!(matches!(&result[0], Statement::Send(_)));
 }
 
 #[test]
 fn test_remove_file_with_timeout() {
     let result = strict_parse("--remove_file /tmp/f 5\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::RemoveFile(c) => {
             assert_eq!(c.file.to_raw_string(), "/tmp/f");
             assert_eq!(c.timeout, Some("5".to_string()));
@@ -2203,7 +2203,7 @@ macro_rules! visitor_test {
                 }
             }
             let mut v = V { visited: false };
-            v.visit_mt_file(&result);
+            v.visit_statements(&result);
             assert!(v.visited);
         }
     };
@@ -2434,10 +2434,10 @@ visitor_test!(
 
 #[test]
 fn test_visitor_visit_output_direct() {
-    let file = MTFile::new(vec![Statement::Output(OutputCmd {
+    let file = vec![Statement::Output(OutputCmd {
         span: Span::dummy(),
         file: "/tmp/out.txt".into(),
-    })]);
+    })];
     struct V {
         visited: bool,
     }
@@ -2448,11 +2448,11 @@ fn test_visitor_visit_output_direct() {
         }
     }
     let mut v = V { visited: false };
-    v.visit_mt_file(&file);
+    v.visit_statements(&file);
     assert!(v.visited);
 }
 
-// --- Visitor: visit_mt_file Stop path ---
+// --- Visitor: visit_statements Stop path ---
 
 #[test]
 fn test_visitor_test_file_stop_on_statement() {
@@ -2471,7 +2471,7 @@ fn test_visitor_test_file_stop_on_statement() {
         }
     }
     let mut v = StopVisitor { count: 0 };
-    let r = v.visit_mt_file(&result);
+    let r = v.visit_statements(&result);
     assert_eq!(r, VisitResult::Stop);
     assert_eq!(v.count, 1);
 }
@@ -2495,7 +2495,7 @@ fn test_visitor_if_block_stop_on_child() {
         }
     }
     let mut v = StopVisitor { count: 0 };
-    let r = v.visit_mt_file(&result);
+    let r = v.visit_statements(&result);
     assert_eq!(r, VisitResult::Stop);
 }
 
@@ -2519,7 +2519,7 @@ fn test_visitor_while_block_stop_on_child() {
         }
     }
     let mut v = StopVisitor { count: 0 };
-    let r = v.visit_mt_file(&result);
+    let r = v.visit_statements(&result);
     assert_eq!(r, VisitResult::Stop);
     assert_eq!(v.count, 4);
 }
@@ -2539,7 +2539,7 @@ fn test_visitor_if_skip() {
         }
     }
     let mut v = SkipVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -2558,7 +2558,7 @@ fn test_visitor_while_skip() {
         }
     }
     let mut v = SkipVisitor { visited: false };
-    v.visit_mt_file(&result);
+    v.visit_statements(&result);
     assert!(v.visited);
 }
 
@@ -2577,7 +2577,7 @@ fn test_mut_visitor_basic() {
         }
     }
     let mut v = Counter { count: 0 };
-    v.visit_mt_file_mut(&mut result);
+    v.visit_statements_mut(&mut result);
     assert_eq!(v.count, 2);
 }
 
@@ -2602,7 +2602,7 @@ fn test_mut_visitor_if_traversal() {
         visited_if: false,
         child_count: 0,
     };
-    v.visit_mt_file_mut(&mut result);
+    v.visit_statements_mut(&mut result);
     assert!(v.visited_if);
     // 3 statements total: If itself, echo, dec
     assert_eq!(v.child_count, 3);
@@ -2629,7 +2629,7 @@ fn test_mut_visitor_while_traversal() {
         visited_while: false,
         child_count: 0,
     };
-    v.visit_mt_file_mut(&mut result);
+    v.visit_statements_mut(&mut result);
     assert!(v.visited_while);
     // 2: While itself + dec
     assert_eq!(v.child_count, 2);
@@ -2656,7 +2656,7 @@ fn test_mut_visitor_if_skip() {
         visited_if: false,
         child_count: 0,
     };
-    v.visit_mt_file_mut(&mut result);
+    v.visit_statements_mut(&mut result);
     assert!(v.visited_if);
     assert_eq!(v.child_count, 1);
 }
@@ -2678,7 +2678,7 @@ fn test_mut_visitor_if_stop() {
         }
     }
     let mut v = StopMutVisitor { count: 0 };
-    let r = v.visit_mt_file_mut(&mut result);
+    let r = v.visit_statements_mut(&mut result);
     assert_eq!(r, VisitResult::Stop);
     assert_eq!(v.count, 1);
 }
@@ -2700,7 +2700,7 @@ fn test_mut_visitor_while_stop_on_child() {
         }
     }
     let mut v = StopMutVisitor { count: 0 };
-    let r = v.visit_mt_file_mut(&mut result);
+    let r = v.visit_statements_mut(&mut result);
     assert_eq!(r, VisitResult::Stop);
 }
 
@@ -2717,8 +2717,8 @@ fn test_mut_visitor_modify_text() {
         }
     }
     let mut v = TextModifier;
-    v.visit_mt_file_mut(&mut result);
-    match &result.statements[0] {
+    v.visit_statements_mut(&mut result);
+    match &result[0] {
         Statement::Echo(c) => assert_eq!(c.text.to_raw_string(), "modified"),
         other => panic!("expected Echo, got {:?}", other),
     }
@@ -2731,11 +2731,11 @@ macro_rules! span_test {
         #[test]
         fn $name() {
             let result = strict_parse($input);
-            assert!(!result.statements.is_empty());
-            let span = result.statements[0].span();
+            assert!(!result.is_empty());
+            let span = result[0].span();
             assert_eq!(span.line, 1);
             assert!(span.len > 0);
-            match &result.statements[0] {
+            match &result[0] {
                 $variant => {}
                 other => panic!("unexpected: {:?}", other),
             }
@@ -3073,7 +3073,7 @@ fn test_interpolated_text_escape_backslash() {
 
 #[test]
 fn test_delimiter_no_arg_error() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--delimiter\n", config);
     assert!(result.is_err());
     let msg = format!("{}", result.unwrap_err());
@@ -3089,7 +3089,7 @@ fn test_assert_v57_error() {
 
 #[test]
 fn test_let_invalid_no_equals() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--let $nonsense\n", config);
     assert!(result.is_err());
     let msg = format!("{}", result.unwrap_err());
@@ -3098,21 +3098,21 @@ fn test_let_invalid_no_equals() {
 
 #[test]
 fn test_let_invalid_empty_var() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--let = 5\n", config);
     assert!(result.is_err());
 }
 
 #[test]
 fn test_expr_invalid_no_dollar() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--expr x = 1\n", config);
     assert!(result.is_err());
 }
 
 #[test]
 fn test_expr_invalid_no_equals() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--expr $x\n", config);
     assert!(result.is_err());
 }
@@ -3120,7 +3120,7 @@ fn test_expr_invalid_no_equals() {
 #[test]
 fn test_connect_without_parens() {
     let result = strict_parse("connect con1;\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Connect(c) => {
             assert_eq!(
                 c.name.as_ref().map(|t| t.to_raw_string()),
@@ -3134,7 +3134,7 @@ fn test_connect_without_parens() {
 #[test]
 fn test_replace_regex_dollar_var() {
     let result = strict_parse("--replace_regex $pattern\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "$pattern");
             assert!(c.replacement.is_empty());
@@ -3147,7 +3147,7 @@ fn test_replace_regex_dollar_var() {
 #[test]
 fn test_replace_regex_s_prefix() {
     let result = strict_parse("--replace_regex s/old/new/\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "old");
             assert_eq!(c.replacement, "new");
@@ -3160,7 +3160,7 @@ fn test_replace_regex_s_prefix() {
 #[test]
 fn test_replace_regex_with_flags() {
     let result = strict_parse("--replace_regex s/old/new/i\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.flags, Some("i".to_string()));
         }
@@ -3171,7 +3171,7 @@ fn test_replace_regex_with_flags() {
 #[test]
 fn test_replace_regex_empty_replacement() {
     let result = strict_parse("--replace_regex s/old//\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "old");
             assert_eq!(c.replacement, "");
@@ -3183,7 +3183,7 @@ fn test_replace_regex_empty_replacement() {
 #[test]
 fn test_replace_regex_no_closing_sep() {
     let result = strict_parse("--replace_regex /pattern_only\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "pattern_only");
             assert_eq!(c.replacement, "");
@@ -3194,14 +3194,14 @@ fn test_replace_regex_no_closing_sep() {
 
 #[test]
 fn test_replace_regex_invalid_syntax() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--replace_regex invalid\n", config);
     assert!(result.is_err());
 }
 
 // --- replace_regex MariaDB paired delimiters ---
 
-fn mariadb_parse(input: &str) -> MTFile {
+fn mariadb_parse(input: &str) -> Vec<Statement> {
     let config = ParserConfig::new(MysqlVersion::MariaDB);
     parse(input, config).expect("parse failed")
 }
@@ -3209,7 +3209,7 @@ fn mariadb_parse(input: &str) -> MTFile {
 #[test]
 fn test_mariadb_replace_regex_paren() {
     let result = mariadb_parse("--replace_regex (/some/path)</another/path>\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "/some/path");
             assert_eq!(c.replacement, "/another/path");
@@ -3222,7 +3222,7 @@ fn test_mariadb_replace_regex_paren() {
 #[test]
 fn test_mariadb_replace_regex_bracket() {
     let result = mariadb_parse("--replace_regex [pattern][replacement]\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "pattern");
             assert_eq!(c.replacement, "replacement");
@@ -3235,7 +3235,7 @@ fn test_mariadb_replace_regex_bracket() {
 fn test_mariadb_replace_regex_brace_with_escape() {
     // \} escapes the closing brace, \/ escapes the slash in replacement
     let result = mariadb_parse("--replace_regex {pat\\}tern}/replace\\/ment/i\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "pat}tern");
             assert_eq!(c.replacement, "replace/ment");
@@ -3248,7 +3248,7 @@ fn test_mariadb_replace_regex_brace_with_escape() {
 #[test]
 fn test_mariadb_replace_regex_single_char_delimiter() {
     let result = mariadb_parse("--replace_regex !old!new!\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "old");
             assert_eq!(c.replacement, "new");
@@ -3261,7 +3261,7 @@ fn test_mariadb_replace_regex_single_char_delimiter() {
 fn test_mariadb_replace_regex_same_paired_delimiter() {
     // Both pattern and replacement use () — after pattern's ), the second ( sets new pair
     let result = mariadb_parse("--replace_regex (pat\\)tern)(new)i\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "pat)tern");
             assert_eq!(c.replacement, "new");
@@ -3274,7 +3274,7 @@ fn test_mariadb_replace_regex_same_paired_delimiter() {
 #[test]
 fn test_mariadb_replace_regex_slash_delimiter() {
     let result = mariadb_parse("--replace_regex /old/new/\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "old");
             assert_eq!(c.replacement, "new");
@@ -3286,7 +3286,7 @@ fn test_mariadb_replace_regex_slash_delimiter() {
 #[test]
 fn test_mariadb_replace_regex_slash_with_escape() {
     let result = mariadb_parse("--replace_regex /path\\/to/new/i\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "path/to");
             assert_eq!(c.replacement, "new");
@@ -3300,7 +3300,7 @@ fn test_mariadb_replace_regex_slash_with_escape() {
 fn test_mariadb_replace_regex_mixed_paired() {
     // Pattern with (), replacement with <> — the </> delimiters
     let result = mariadb_parse("--replace_regex (pattern)<replacement>\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "pattern");
             assert_eq!(c.replacement, "replacement");
@@ -3312,7 +3312,7 @@ fn test_mariadb_replace_regex_mixed_paired() {
 #[test]
 fn test_mariadb_replace_regex_empty_replacement() {
     let result = mariadb_parse("--replace_regex /pattern//\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "pattern");
             assert!(c.replacement.is_empty());
@@ -3350,7 +3350,7 @@ fn test_mysql_rejects_arbitrary_delimiter() {
 fn test_mysql_still_accepts_s_prefix() {
     let config = ParserConfig::new(MysqlVersion::V80);
     let result = parse("--replace_regex s/old/new/\n", config).expect("parse failed");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ReplaceRegex(c) => {
             assert_eq!(c.pattern, "old");
             assert_eq!(c.replacement, "new");
@@ -3364,7 +3364,7 @@ fn test_mysql_still_accepts_s_prefix() {
 #[test]
 fn test_enable_prepare_warnings() {
     let result = strict_parse("--enable_prepare_warnings\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Toggle(c) => {
             assert!(matches!(c.kind, ToggleKind::PrepareWarnings));
             assert!(c.enabled);
@@ -3376,7 +3376,7 @@ fn test_enable_prepare_warnings() {
 #[test]
 fn test_disable_prepare_warnings() {
     let result = strict_parse("--disable_prepare_warnings\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Toggle(c) => {
             assert!(matches!(c.kind, ToggleKind::PrepareWarnings));
             assert!(!c.enabled);
@@ -3388,7 +3388,7 @@ fn test_disable_prepare_warnings() {
 #[test]
 fn test_prepare_warnings_toggle_once() {
     let result = strict_parse("--disable_prepare_warnings ONCE\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Toggle(c) => {
             assert!(matches!(c.kind, ToggleKind::PrepareWarnings));
             assert!(!c.enabled);
@@ -3402,17 +3402,17 @@ fn test_prepare_warnings_toggle_once() {
 
 #[test]
 fn test_parse_bytes_basic() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let input = b"--echo hello\n";
     let result = parse_bytes(input, config).expect("parse failed");
-    assert_eq!(result.statements.len(), 1);
+    assert_eq!(result.len(), 1);
 }
 
 // --- Unterminated blocks ---
 
 #[test]
 fn test_unterminated_write_file() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--write_file /tmp/f\ncontent\n", config);
     assert!(result.is_err());
     let msg = format!("{}", result.unwrap_err());
@@ -3421,7 +3421,7 @@ fn test_unterminated_write_file() {
 
 #[test]
 fn test_unterminated_perl_block() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--perl\nprint 1;\n", config);
     assert!(result.is_err());
 }
@@ -3431,7 +3431,7 @@ fn test_unterminated_perl_block() {
 #[test]
 fn test_condition_trimmed_parens() {
     let result = strict_parse("--if (  $x == 1  )\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => {
             assert!(matches!(&b.condition, Expr::Comparison { .. }));
         }
@@ -3444,7 +3444,7 @@ fn test_condition_trimmed_parens() {
 #[test]
 fn test_condition_comparison_query_rhs() {
     let result = strict_parse("--if ($x == `SELECT 1`)\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::Comparison { right, .. } => {
                 assert!(matches!(right.as_ref(), ComparisonRhs::Query(_)));
@@ -3460,7 +3460,7 @@ fn test_condition_comparison_query_rhs() {
 #[test]
 fn test_mariadb_dollar_paren_with_spaces() {
     let result = parse_mariadb("--if ($(1 + 2))\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => {
             assert!(matches!(&b.condition, Expr::MariaDBClosure { .. }));
         }
@@ -3471,7 +3471,7 @@ fn test_mariadb_dollar_paren_with_spaces() {
 #[test]
 fn test_mariadb_backtick_in_logical() {
     let result = parse_mariadb("--if ($x && `SELECT 1`)\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => {
             assert!(matches!(&b.condition, Expr::MariaDBLogical { .. }));
         }
@@ -3482,7 +3482,7 @@ fn test_mariadb_backtick_in_logical() {
 #[test]
 fn test_mariadb_paren_in_logical() {
     let result = parse_mariadb("--if ($x || ($y && $z))\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => {
             assert!(matches!(&b.condition, Expr::MariaDBLogical { .. }));
         }
@@ -3494,7 +3494,7 @@ fn test_mariadb_paren_in_logical() {
 
 #[test]
 fn test_condition_only_parens() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--if ()\n{\n}\n", config);
     assert!(result.is_err());
 }
@@ -3513,7 +3513,7 @@ fn test_version_assert_v80() {
 
 #[test]
 fn test_version_assert_compatible() {
-    assert!(MysqlVersion::Compatible.has_assert());
+    assert!(MysqlVersion::MySQL.has_assert());
 }
 
 #[test]
@@ -3523,7 +3523,7 @@ fn test_version_command_system_on_v80() {
 
 #[test]
 fn test_version_command_system_on_compatible() {
-    assert!(MysqlVersion::Compatible.has_command("system"));
+    assert!(MysqlVersion::MySQL.has_command("system"));
 }
 
 #[test]
@@ -3547,7 +3547,7 @@ fn test_version_mariadb_has_all() {
 #[test]
 fn test_parser_config_default() {
     let config = ParserConfig::default();
-    assert_eq!(config.version, MysqlVersion::Compatible);
+    assert_eq!(config.version, MysqlVersion::MySQL);
 }
 
 // --- Output command (constructed directly, not parsed) ---
@@ -3571,7 +3571,7 @@ fn test_output_command_constructed() {
 #[test]
 fn test_error_no_codes() {
     let result = strict_parse("--error\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Error(c) => {
             assert!(c.error_codes.is_empty());
         }
@@ -3584,7 +3584,7 @@ fn test_error_no_codes() {
 #[test]
 fn test_change_user_empty() {
     let result = strict_parse("--change_user\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::ChangeUser(c) => {
             assert!(c.user.is_none());
             assert!(c.password.is_none());
@@ -3599,7 +3599,7 @@ fn test_change_user_empty() {
 #[test]
 fn test_bare_if_content_after_brace() {
     let result = strict_parse("if ($x) { --echo inline; }\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => {
             assert_eq!(b.body.len(), 1);
         }
@@ -3612,7 +3612,7 @@ fn test_bare_if_content_after_brace() {
 #[test]
 fn test_while_block() {
     let result = strict_parse("--let $i= 5;\n--while ($i)\n{\n--dec $i;\n}\n");
-    assert!(matches!(&result.statements[1], Statement::While(_)));
+    assert!(matches!(&result[1], Statement::While(_)));
 }
 
 // --- Bare write_file/append_file (delimiter-aware) ---
@@ -3620,7 +3620,7 @@ fn test_while_block() {
 #[test]
 fn test_bare_write_file_with_delimiter() {
     let result = strict_parse("write_file \"/tmp/test.txt\"\ncontent\nEOF\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::WriteFile(c) => {
             assert_eq!(c.filename.to_raw_string(), "/tmp/test.txt");
             assert_eq!(c.end_marker, "EOF");
@@ -3633,7 +3633,7 @@ fn test_bare_write_file_with_delimiter() {
 #[test]
 fn test_bare_append_file_block() {
     let result = strict_parse("append_file /tmp/f\nmore content\nEOF\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::AppendFile(c) => {
             assert!(c.content.to_raw_string().contains("more content"));
         }
@@ -3645,7 +3645,7 @@ fn test_bare_append_file_block() {
 
 #[test]
 fn test_unterminated_if_no_brace() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--if ($x)\n--echo test\n", config);
     assert!(result.is_err());
     let msg = format!("{}", result.unwrap_err());
@@ -3654,7 +3654,7 @@ fn test_unterminated_if_no_brace() {
 
 #[test]
 fn test_unterminated_bare_if_no_brace() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("if ($x)\n--echo test\n", config);
     assert!(result.is_err());
 }
@@ -3664,7 +3664,7 @@ fn test_unterminated_bare_if_no_brace() {
 #[test]
 fn test_inline_if_empty_body() {
     let result = strict_parse("if ($x) {}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => {
             assert_eq!(b.body.len(), 1);
             assert!(matches!(&b.body[0], Statement::Empty));
@@ -3679,7 +3679,7 @@ fn test_inline_if_empty_body() {
 fn test_inline_if_error_fallback_body() {
     // Body text that doesn't match any command — falls back to SQL
     let result = strict_parse("if ($x) { random_stuff; }\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => {
             assert_eq!(b.body.len(), 1);
             assert!(matches!(&b.body[0], Statement::Sql(_)));
@@ -3692,10 +3692,10 @@ fn test_inline_if_error_fallback_body() {
 
 #[test]
 fn test_strip_delimiter_no_quotes() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     // Simple case: no quotes, strip delimiter normally
     let result = parse("write_file /tmp/test.txt\ncontent\nEOF\n", config).expect("parse failed");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::WriteFile(c) => {
             assert_eq!(c.filename.to_raw_string(), "/tmp/test.txt");
         }
@@ -3706,9 +3706,9 @@ fn test_strip_delimiter_no_quotes() {
 #[test]
 fn test_write_file_unclosed_quotes() {
     // Unclosed quotes — delimiter not stripped
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("write_file \"/tmp/test\ncontent\nEOF\n", config).expect("parse failed");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::WriteFile(c) => {
             // Unclosed quote means delimiter not stripped, but filename parsing still works
             assert!(c.filename.to_raw_string().contains("test"));
@@ -3721,7 +3721,7 @@ fn test_write_file_unclosed_quotes() {
 
 #[test]
 fn test_write_file_empty_filename() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--write_file\ncontent\nEOF\n", config);
     assert!(result.is_err());
     let msg = format!("{}", result.unwrap_err());
@@ -3732,11 +3732,11 @@ fn test_write_file_empty_filename() {
 
 #[test]
 fn test_let_open_backtick() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--let $x = `query\n", config);
     // Open backtick without close — parsed as literal (stripped trailing newline by parse)
     let result = result.expect("parse failed");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::Let(c) => {
             assert_eq!(c.variable, "x");
             match &c.value {
@@ -3752,7 +3752,7 @@ fn test_let_open_backtick() {
 
 #[test]
 fn test_inc_no_dollar() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--inc xyz\n", config);
     // Should parse — inc gets empty variable name
     assert!(result.is_err());
@@ -3764,7 +3764,7 @@ fn test_inc_no_dollar() {
 
 #[test]
 fn test_dec_no_dollar() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--dec xyz\n", config);
     assert!(result.is_err());
     let msg = format!("{}", result.unwrap_err());
@@ -3776,9 +3776,9 @@ fn test_dec_no_dollar() {
 #[test]
 fn test_delimiter_terminated_with_trailing_comment() {
     let result = strict_parse("SELECT 1;\n# comment\n");
-    assert_eq!(result.statements.len(), 2);
-    assert!(matches!(&result.statements[0], Statement::Sql(_)));
-    assert!(matches!(&result.statements[1], Statement::Comment(_)));
+    assert_eq!(result.len(), 2);
+    assert!(matches!(&result[0], Statement::Sql(_)));
+    assert!(matches!(&result[1], Statement::Comment(_)));
 }
 
 // --- Flow condition: parse_rhs with integer ---
@@ -3786,7 +3786,7 @@ fn test_delimiter_terminated_with_trailing_comment() {
 #[test]
 fn test_condition_comparison_integer_rhs_direct() {
     let result = strict_parse("--if ($x == 42)\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::Comparison { right, .. } => {
                 assert!(matches!(right.as_ref(), ComparisonRhs::Integer(42)));
@@ -3802,7 +3802,7 @@ fn test_condition_comparison_integer_rhs_direct() {
 #[test]
 fn test_condition_open_paren_no_close() {
     // Open paren but no closing — falls back to full input
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--if ($x == 1\n{\n}\n", config);
     // May parse or fail depending on condition handling
     // The important thing is it doesn't panic
@@ -3813,7 +3813,7 @@ fn test_condition_open_paren_no_close() {
 fn test_condition_no_paren() {
     // No paren at all — condition is the full text
     let result = strict_parse("--if $x\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => {
             assert!(matches!(&b.condition, Expr::Variable(_)));
         }
@@ -3825,7 +3825,7 @@ fn test_condition_no_paren() {
 fn test_condition_backtick_no_close() {
     // Backtick without closing — falls through to string comparison
     let result = strict_parse("--if ($x == `query)\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::Comparison { right, .. } => {
                 assert!(matches!(right.as_ref(), ComparisonRhs::String(_)));
@@ -3847,7 +3847,7 @@ fn test_mariadb_dollar_paren_no_close() {
 #[test]
 fn test_condition_query_no_close_backtick() {
     // Backtick query without closing backtick at top level
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--if (`SELECT 1\n{\n}\n", config);
     // Should not panic — may error
     let _ = result;
@@ -3858,7 +3858,7 @@ fn test_condition_query_no_close_backtick() {
 #[test]
 fn test_mariadb_or_at_end() {
     let result = parse_mariadb("--if ($a || $b)\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => {
             assert!(matches!(&b.condition, Expr::MariaDBLogical { .. }));
         }
@@ -3870,7 +3870,7 @@ fn test_mariadb_or_at_end() {
 fn test_mariadb_and_no_op() {
     // No logical operator — should be parsed as variable
     let result = parse_mariadb("--if ($x)\n{\n}\n");
-    match &result.statements[0] {
+    match &result[0] {
         Statement::If(b) => {
             assert!(matches!(&b.condition, Expr::Variable(_)));
         }
@@ -3882,7 +3882,7 @@ fn test_mariadb_and_no_op() {
 
 #[test]
 fn test_condition_backtick_query_in_inner_no_close() {
-    let config = ParserConfig::new(MysqlVersion::Compatible);
+    let config = ParserConfig::new(MysqlVersion::MySQL);
     let result = parse("--if (`SELECT *\n{\n}\n", config);
     assert!(result.is_err());
 }
@@ -3961,7 +3961,7 @@ fn test_visitor_exhaustive() {
     let result = strict_parse(&input);
 
     // Construct with Assert and Output (not parseable)
-    let mut all_stmts: Vec<Statement> = result.statements.clone();
+    let mut all_stmts: Vec<Statement> = result.clone();
     all_stmts.push(Statement::Output(OutputCmd {
         span: Span::dummy(),
         file: "/tmp/out".into(),
@@ -3972,7 +3972,7 @@ fn test_visitor_exhaustive() {
     }));
     all_stmts.push(Statement::Empty);
 
-    let file = MTFile::new(all_stmts);
+    let file = &all_stmts;
 
     struct ExhaustiveVisitor {
         count: u32,
@@ -3991,7 +3991,7 @@ fn test_visitor_exhaustive() {
         count: 0,
         leave_count: 0,
     };
-    v.visit_mt_file(&file);
+    v.visit_statements(&file);
     // All statements should be visited
     assert!(v.count > 60);
     assert_eq!(v.count, v.leave_count);
@@ -4014,7 +4014,7 @@ fn test_mut_visitor_exhaustive() {
     struct DefaultV;
     impl MutVisitor for DefaultV {}
     let mut v = DefaultV;
-    v.visit_mt_file_mut(&mut result);
+    v.visit_statements_mut(&mut result);
 }
 
 // MutVisitor with overridden visit_statement_mut only
@@ -4031,7 +4031,7 @@ fn test_mut_visitor_default_inner() {
         }
     }
     let mut v = Counter { count: 0 };
-    v.visit_mt_file_mut(&mut result);
+    v.visit_statements_mut(&mut result);
     assert_eq!(v.count, 3);
 }
 
@@ -4051,7 +4051,7 @@ fn test_mut_visitor_stop_in_if_child() {
         }
     }
     let mut v = StopOnEcho;
-    let r = v.visit_mt_file_mut(&mut result);
+    let r = v.visit_statements_mut(&mut result);
     assert_eq!(r, VisitResult::Stop);
 }
 
@@ -4069,6 +4069,6 @@ fn test_mut_visitor_stop_in_while_child() {
         }
     }
     let mut v = StopOnEcho;
-    let r = v.visit_mt_file_mut(&mut result);
+    let r = v.visit_statements_mut(&mut result);
     assert_eq!(r, VisitResult::Stop);
 }

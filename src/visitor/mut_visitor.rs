@@ -1,12 +1,11 @@
-use crate::ast::MTFile;
 use crate::ast::statement::*;
 
 use super::VisitResult;
 
 /// Mutable visitor trait for traversing and modifying the AST.
 pub trait MutVisitor {
-    fn visit_mt_file_mut(&mut self, file: &mut MTFile) -> VisitResult {
-        for stmt in &mut file.statements {
+    fn visit_statements_mut(&mut self, statements: &mut [Statement]) -> VisitResult {
+        for stmt in statements.iter_mut() {
             if self.visit_statement_mut(stmt) == VisitResult::Stop {
                 return VisitResult::Stop;
             }

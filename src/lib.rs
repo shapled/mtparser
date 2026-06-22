@@ -10,7 +10,7 @@
 //! - MySQL 8.4
 //! - MySQL 9.7
 //!
-//! Default is `MysqlVersion::Compatible`, which accepts commands from any version.
+//! Default is `MysqlVersion::MySQL`, which accepts commands from any version.
 //!
 //! ## Quick Start
 //!

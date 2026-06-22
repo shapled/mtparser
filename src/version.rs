@@ -5,9 +5,9 @@ bitflags! {
     ///
     /// Single versions: `MysqlVersion::V80`
     /// Union of versions: `MysqlVersion::V80 | MysqlVersion::V84`
-    /// All MySQL: `MysqlVersion::Compatible`
+    /// All MySQL: `MysqlVersion::MySQL`
     /// All MariaDB: `MysqlVersion::MariaDB`
-    /// Both: `MysqlVersion::Compatible | MysqlVersion::MariaDB`
+    /// Everything: `MysqlVersion::Compatible` (= `MySQL | MariaDB`)
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct MysqlVersion: u16 {
         // MySQL versions
@@ -17,7 +17,7 @@ bitflags! {
         const V97 = 1 << 3;
 
         /// Union of all MySQL versions.
-        const Compatible = 0b1111;
+        const MySQL = 0b1111;
 
         // MariaDB versions
         const MariaDB_1011 = 1 << 4;
@@ -27,6 +27,9 @@ bitflags! {
 
         /// Union of all MariaDB versions.
         const MariaDB = 0b11110000;
+
+        /// All MySQL + MariaDB versions.
+        const Compatible = 0b11111111;
     }
 }
 

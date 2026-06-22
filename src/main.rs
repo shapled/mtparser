@@ -61,10 +61,10 @@ fn parse_version_flag(args: &[String], base: usize) -> MysqlVersion {
             "mariadb-11.8" => MysqlVersion::MariaDB_118,
             "mariadb-12.3" => MysqlVersion::MariaDB_123,
             "mariadb" => MysqlVersion::MariaDB,
-            _ => MysqlVersion::Compatible,
+            _ => MysqlVersion::MySQL,
         }
     } else {
-        MysqlVersion::Compatible
+        MysqlVersion::MySQL
     }
 }
 
