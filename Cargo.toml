@@ -1,13 +1,13 @@
 [package]
 name = "mtparser"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
-description = "MySQL mysqltest test file parser — parses .test/.inc files into a typed AST"
+description = "Parser for MySQL mysqltest and MariaDB mariadb-test files, built with winnow"
 license = "Apache-2.0"
-repository = "https://github.com/zhangxiaopeng20/mtparser"
+repository = "https://github.com/shapled/mtparser"
 readme = "README.md"
-keywords = ["mysql", "mysqltest", "mtr", "parser", "ast"]
-categories = ["parser-implementations", "development-tools"]
+keywords = ["mysql", "mariadb", "mysql-test", "parser", "winnow"]
+categories = ["parser-implementations"]
 
 [lib]
 name = "mtparser"
