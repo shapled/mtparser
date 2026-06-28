@@ -3,15 +3,14 @@
 //! All parsers operate on `crate::parser::Stream`, threading the `ParserState`
 //! (which carries the MySQL/MariaDB version) through the combinators.
 
+use winnow::Parser;
 use winnow::combinator::{alt, cut_err, opt, preceded, terminated};
 use winnow::stream::LocatingSlice;
 use winnow::stream::Stream as StreamTrait;
 use winnow::token::{one_of, take_till, take_while};
-use winnow::Parser;
 
-use crate::ast::expr::{ComparisonOp, ComparisonRhs, Expr, QueryExpr, VariableRef};
 use crate::ast::Span;
-use crate::version::MysqlVersion;
+use crate::ast::expr::{ComparisonOp, ComparisonRhs, Expr, QueryExpr, VariableRef};
 
 /// The unified stream type, re-imported for brevity.
 type Stream<'s> = crate::parser::Stream<'s>;
@@ -19,20 +18,6 @@ type Stream<'s> = crate::parser::Stream<'s>;
 // ---------------------------------------------------------------------------
 // Top-level entry
 // ---------------------------------------------------------------------------
-
-/// Parse a condition expression from an if/while/assert command.
-/// Input is the text after the command name, e.g., `($var == "value")` or `($var)`.
-pub(crate) fn parse_condition(input: &str, version: MysqlVersion) -> Result<Expr, crate::error::ParseError> {
-    let state = crate::parser::ParserState::new(version, input);
-    let mut stream = Stream {
-        input: LocatingSlice::new(input),
-        state,
-    };
-    parse_condition_stream(&mut stream).map_err(|e| crate::error::ParseError::InvalidExpression {
-        message: format!("condition parse error: {}", e),
-        span: Span::dummy(),
-    })
-}
 
 /// Winnow combinator: parse a full condition expression from a `Stream`.
 /// Reads parens + optional negation, dispatches to the inner expression parser.
@@ -54,7 +39,9 @@ pub(crate) fn parse_condition_stream(stream: &mut Stream) -> winnow::ModalResult
 
     let inner = inner.trim();
     if inner.is_empty() {
-        return Err(winnow::error::ErrMode::Backtrack(winnow::error::ContextError::default()));
+        return Err(winnow::error::ErrMode::Backtrack(
+            winnow::error::ContextError::default(),
+        ));
     }
     // Consume from stream (advance the LocatingSlice by `consumed` bytes)
     for _ in 0..consumed {
@@ -104,7 +91,9 @@ fn parse_inner_expr(stream: &mut Stream) -> winnow::ModalResult<Expr> {
 /// Parse `$()` MariaDB closure expression.
 fn parse_mariadb_closure(stream: &mut Stream) -> winnow::ModalResult<Expr> {
     if !stream.state.version.is_mariadb() {
-        return Err(winnow::error::ErrMode::Backtrack(winnow::error::ContextError::default()));
+        return Err(winnow::error::ErrMode::Backtrack(
+            winnow::error::ContextError::default(),
+        ));
     }
     let expr = preceded("$(", terminated(take_till(0.., [')']), ')')).parse_next(stream)?;
     Ok(Expr::MariaDBClosure {
@@ -118,7 +107,9 @@ fn parse_mariadb_closure(stream: &mut Stream) -> winnow::ModalResult<Expr> {
 fn parse_mariadb_logical(stream: &mut Stream) -> winnow::ModalResult<Expr> {
     // Only for MariaDB — check version in the alt branch
     if !stream.state.version.is_mariadb() {
-        return Err(winnow::error::ErrMode::Backtrack(winnow::error::ContextError::default()));
+        return Err(winnow::error::ErrMode::Backtrack(
+            winnow::error::ContextError::default(),
+        ));
     }
 
     let input: &str = *stream.input;
@@ -130,7 +121,9 @@ fn parse_mariadb_logical(stream: &mut Stream) -> winnow::ModalResult<Expr> {
             });
         }
     }
-    Err(winnow::error::ErrMode::Backtrack(winnow::error::ContextError::default()))
+    Err(winnow::error::ErrMode::Backtrack(
+        winnow::error::ContextError::default(),
+    ))
 }
 
 /// Parse a variable with optional comparison: `$var [op rhs]` or just `$var`.
@@ -182,7 +175,9 @@ fn parse_backtick_query(stream: &mut Stream) -> winnow::ModalResult<Expr> {
 /// Parse an integer literal.
 fn parse_integer(stream: &mut Stream) -> winnow::ModalResult<Expr> {
     let digits = take_while(1.., ('0'..='9',)).parse_next(stream)?;
-    let n: i64 = digits.parse().map_err(|_| winnow::error::ErrMode::Backtrack(winnow::error::ContextError::default()))?;
+    let n: i64 = digits
+        .parse()
+        .map_err(|_| winnow::error::ErrMode::Backtrack(winnow::error::ContextError::default()))?;
     Ok(Expr::Integer(n))
 }
 
@@ -193,7 +188,8 @@ fn parse_integer(stream: &mut Stream) -> winnow::ModalResult<Expr> {
 /// Parse a `$variable_name` reference.
 fn parse_variable(stream: &mut Stream) -> winnow::ModalResult<VariableRef> {
     let _: char = one_of('$').parse_next(stream)?;
-    let name = cut_err(take_while(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_', '-'))).parse_next(stream)?;
+    let name =
+        cut_err(take_while(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_', '-'))).parse_next(stream)?;
     Ok(VariableRef::new(Span::dummy(), name.to_string()))
 }
 
@@ -210,8 +206,7 @@ fn parse_rhs(stream: &mut Stream) -> winnow::ModalResult<ComparisonRhs> {
         // Quote-delimited string: "value" or 'value'
         parse_rhs_quoted_string,
         // Bare string (fallback)
-        take_till(0.., ['\r', '\n', ';', ')'])
-            .map(|s: &str| ComparisonRhs::String(s.to_string())),
+        take_till(0.., ['\r', '\n', ';', ')']).map(|s: &str| ComparisonRhs::String(s.to_string())),
     ))
     .parse_next(stream)
 }
@@ -219,14 +214,21 @@ fn parse_rhs(stream: &mut Stream) -> winnow::ModalResult<ComparisonRhs> {
 /// Parse variable RHS: $name.
 fn parse_rhs_variable(stream: &mut Stream) -> winnow::ModalResult<ComparisonRhs> {
     let _: char = one_of('$').parse_next(stream)?;
-    let name = cut_err(take_while(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_', '-'))).parse_next(stream)?;
-    Ok(ComparisonRhs::Variable(VariableRef::new(Span::dummy(), name.to_string())))
+    let name =
+        cut_err(take_while(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_', '-'))).parse_next(stream)?;
+    Ok(ComparisonRhs::Variable(VariableRef::new(
+        Span::dummy(),
+        name.to_string(),
+    )))
 }
 
 /// Parse backtick query RHS: `SQL`.
 fn parse_rhs_backtick(stream: &mut Stream) -> winnow::ModalResult<ComparisonRhs> {
     let query = preceded('`', terminated(take_till(0.., ['`']), '`')).parse_next(stream)?;
-    Ok(ComparisonRhs::Query(QueryExpr::new(Span::dummy(), query.to_string())))
+    Ok(ComparisonRhs::Query(QueryExpr::new(
+        Span::dummy(),
+        query.to_string(),
+    )))
 }
 
 /// Parse quoted string RHS: "value" or 'value'.
@@ -339,17 +341,4 @@ fn find_logical_op(s: &str, op: &str) -> Option<usize> {
         }
     }
     None
-}
-
-impl ComparisonOp {
-    pub(crate) fn display_len(&self) -> usize {
-        match self {
-            ComparisonOp::Eq => 2,
-            ComparisonOp::Neq => 2,
-            ComparisonOp::Le => 2,
-            ComparisonOp::Ge => 2,
-            ComparisonOp::Lt => 1,
-            ComparisonOp::Gt => 1,
-        }
-    }
 }

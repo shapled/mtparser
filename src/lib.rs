@@ -1,16 +1,14 @@
 //! # mtparser
 //!
-//! MySQL [`mysqltest`](https://dev.mysql.com/doc/refman/8.0/en/mysql-test-suite.html)
-//! test file parser — parses `.test` / `.inc` files into a typed AST.
+//! Rust parser for MySQL [`mysqltest`](https://dev.mysql.com/doc/refman/8.0/en/mysql-test-suite.html)
+//! and MariaDB `mariadb-test` `.test` / `.inc` files, built with [winnow](https://crates.io/crates/winnow).
 //!
 //! ## Supported Versions
 //!
-//! - MySQL 5.7 (superset of commands)
-//! - MySQL 8.0
-//! - MySQL 8.4
-//! - MySQL 9.7
+//! - MySQL 5.7, 8.0, 8.4, 9.7
+//! - MariaDB 10.11, 11.4, 11.8, 12.3
 //!
-//! Default is `MysqlVersion::MySQL`, which accepts commands from any version.
+//! Default is `MysqlVersion::MySQL`, which accepts commands from any MySQL version.
 //!
 //! ## Quick Start
 //!
@@ -19,8 +17,8 @@
 //!
 //! let input = "--echo \"hello\"\nSELECT 1;\n";
 //! let config = ParserConfig::default();
-//! let test_file = parse(input, config).unwrap();
-//! assert_eq!(test_file.statements.len(), 2);
+//! let statements = parse(input, config).unwrap();
+//! assert_eq!(statements.len(), 2);
 //! ```
 
 pub mod ast;

@@ -4,12 +4,8 @@
 //! parser. Dispatch uses `dispatch!` with `eq_ignore_ascii_case` match guards
 //! for case-insensitive command name routing.
 
-use std::ops::Range;
-
 use winnow::Parser;
-use winnow::combinator::{
-    alt, cut_err, delimited, dispatch, empty, fail, opt, preceded, separated, terminated,
-};
+use winnow::combinator::{alt, delimited, opt, preceded, terminated};
 use winnow::token::{one_of, take_till, take_while};
 
 use crate::ast::Span;
@@ -18,8 +14,7 @@ use crate::ast::expr::QueryExpr;
 use crate::ast::statement::*;
 use crate::ast::text::InterpolatedText;
 use crate::parser::arg;
-use crate::parser::{Stream, modal_err_to_parse_err, range_to_span};
-use crate::version::MysqlVersion;
+use crate::parser::{Stream, range_to_span};
 
 type ModalResult<T> = winnow::error::ModalResult<T>;
 
@@ -210,9 +205,9 @@ pub(crate) fn parse_command(stream: &mut Stream) -> ModalResult<Statement> {
             }
             _ => {
                 let mut err = winnow::error::ContextError::new();
-                err.push(winnow::error::StrContext::Label(
-                    Box::leak(format!("unknown command '{}'", name).into_boxed_str()),
-                ));
+                err.push(winnow::error::StrContext::Label(Box::leak(
+                    format!("unknown command '{}'", name).into_boxed_str(),
+                )));
                 return Err(winnow::error::ErrMode::Backtrack(err));
             }
         };
@@ -276,7 +271,7 @@ fn parse_cmd_die_args(s: &mut Stream) -> ModalResult<Statement> {
     }))
 }
 
-fn parse_cmd_exit_args(s: &mut Stream) -> ModalResult<Statement> {
+fn parse_cmd_exit_args(_s: &mut Stream) -> ModalResult<Statement> {
     Ok(Statement::Exit(ExitCmd {
         span: Span::dummy(),
     }))
@@ -316,7 +311,7 @@ fn parse_cmd_sleep_args(s: &mut Stream) -> ModalResult<Statement> {
     }))
 }
 
-fn parse_cmd_reap_args(s: &mut Stream) -> ModalResult<Statement> {
+fn parse_cmd_reap_args(_s: &mut Stream) -> ModalResult<Statement> {
     Ok(Statement::Reap(ReapCmd {
         span: Span::dummy(),
     }))
@@ -516,7 +511,7 @@ fn parse_cmd_change_user_args(s: &mut Stream) -> ModalResult<Statement> {
     }))
 }
 
-fn parse_cmd_reset_conn_args(s: &mut Stream) -> ModalResult<Statement> {
+fn parse_cmd_reset_conn_args(_s: &mut Stream) -> ModalResult<Statement> {
     Ok(Statement::ResetConnection(ResetConnectionCmd {
         span: Span::dummy(),
     }))
@@ -610,7 +605,7 @@ fn parse_cmd_replace_column_args(s: &mut Stream) -> ModalResult<Statement> {
     }))
 }
 
-fn parse_cmd_sorted_result_args(s: &mut Stream) -> ModalResult<Statement> {
+fn parse_cmd_sorted_result_args(_s: &mut Stream) -> ModalResult<Statement> {
     Ok(Statement::SortedResult(SortedResultCmd {
         span: Span::dummy(),
     }))
@@ -893,7 +888,7 @@ fn parse_cmd_write_line_args(s: &mut Stream) -> ModalResult<Statement> {
 // Special commands
 // ---------------------------------------------------------------------------
 
-fn parse_cmd_end_args(s: &mut Stream) -> ModalResult<Statement> {
+fn parse_cmd_end_args(_s: &mut Stream) -> ModalResult<Statement> {
     Ok(Statement::End(EndCmd {
         span: Span::dummy(),
     }))
@@ -1194,5 +1189,3 @@ pub(crate) fn parse_quoted_arg<'s>(input: &mut &'s str) -> winnow::ModalResult<&
     one_of([open]).parse_next(input)?;
     Ok(content)
 }
-
-use winnow::stream::LocatingSlice;
