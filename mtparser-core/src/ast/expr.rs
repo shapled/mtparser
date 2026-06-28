@@ -2,6 +2,7 @@ use crate::ast::Span;
 
 /// A variable reference: $variable_name
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct VariableRef {
     pub span: Span,
     pub name: String,
@@ -15,6 +16,7 @@ impl VariableRef {
 
 /// A backtick-enclosed query expression: `SELECT ...`
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct QueryExpr {
     pub span: Span,
     pub query: String,
@@ -28,6 +30,7 @@ impl QueryExpr {
 
 /// Comparison operators for expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum ComparisonOp {
     Eq,  // ==
     Neq, // !=
@@ -39,6 +42,7 @@ pub enum ComparisonOp {
 
 /// Right-hand side of a comparison expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum ComparisonRhs {
     Integer(i64),
     String(String),
@@ -48,6 +52,7 @@ pub enum ComparisonRhs {
 
 /// Expression used in if/while/assert conditions.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Expr {
     /// $variable_name
     Variable(VariableRef),

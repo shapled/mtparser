@@ -1,0 +1,28 @@
+[package]
+name = "mtparser"
+version = "0.2.0"
+edition = "2024"
+description = "Parser for MySQL mysqltest and MariaDB mariadb-test files, built with winnow"
+license = "Apache-2.0"
+repository = "https://github.com/shapled/mtparser"
+readme = "../README.md"
+keywords = ["mysql", "mariadb", "mysql-test", "parser", "winnow"]
+categories = ["parser-implementations"]
+
+[lib]
+name = "mtparser"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mtparser"
+path = "src/main.rs"
+
+[dependencies]
+winnow = "1.0"
+thiserror = "2"
+bitflags = "2"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]

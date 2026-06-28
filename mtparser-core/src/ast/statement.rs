@@ -4,6 +4,7 @@ use crate::ast::expr::Expr;
 
 /// Flow control block: if (expr) { body }
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct IfBlock {
     pub span: Span,
     pub condition: Expr,
@@ -12,6 +13,7 @@ pub struct IfBlock {
 
 /// Flow control block: while (expr) { body }
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct WhileBlock {
     pub span: Span,
     pub condition: Expr,
@@ -20,12 +22,14 @@ pub struct WhileBlock {
 
 /// `end` (end of while loop, 5.7 only syntax)
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct EndCmd {
     pub span: Span,
 }
 
 /// Perl block: --perl ... END_PERL
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct PerlBlock {
     pub span: Span,
     pub end_marker: String,
@@ -34,6 +38,7 @@ pub struct PerlBlock {
 
 /// A comment line (# comment)
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct CommentNode {
     pub span: Span,
     pub text: String,
@@ -41,6 +46,7 @@ pub struct CommentNode {
 
 /// A SQL statement (unrecognized command text)
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct SqlStatement {
     pub span: Span,
     pub sql: String,
@@ -48,6 +54,7 @@ pub struct SqlStatement {
 
 /// The root AST node: a single mysqltest statement or command.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Statement {
     // ── Output ──────────────────────────────────────────────
     Echo(EchoCmd),

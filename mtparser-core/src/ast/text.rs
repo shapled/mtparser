@@ -2,6 +2,7 @@ use std::fmt;
 
 /// A segment within interpolated text: either a literal string or a variable reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum TextPart {
     /// Literal text (including escaped `\$` → `$`, and bare `$` before non-identifier chars).
     Literal(String),
@@ -13,6 +14,7 @@ pub enum TextPart {
 ///
 /// Preserves structure for downstream tools that need to reason about variable usage.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct InterpolatedText(Vec<TextPart>);
 
 impl InterpolatedText {

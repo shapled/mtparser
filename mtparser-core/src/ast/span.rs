@@ -1,5 +1,7 @@
 /// Source location for error reporting and tooling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+
 pub struct Span {
     /// 1-based line number.
     pub line: u32,
