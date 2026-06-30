@@ -38,9 +38,19 @@ pub(crate) fn ws(s: &mut Stream) -> winnow::ModalResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Take remaining input (trimmed) as [`InterpolatedText`] (with `$var` interpolation).
-/// Strips trailing delimiter (e.g., `;`) for bare command compatibility.
+///
+/// When delimiter is empty (bare command body via parse_command_body),
+/// reads everything to end of input — supporting multi-line arguments.
+/// When delimiter is set (`--` command on main stream), reads until `\n`
+/// and strips trailing delimiter.
 pub(crate) fn arg_rest(s: &mut Stream) -> winnow::ModalResult<InterpolatedText> {
     let _ = ws(s);
+    if s.state.delimiter.is_empty() {
+        // Bare command body: delimiter already stripped, read everything
+        let rest: &str = winnow::token::rest.parse_next(s)?;
+        return Ok(InterpolatedText::from(rest.trim_end()));
+    }
+    // -- command: read until newline, strip trailing delimiter
     let rest = take_till(0.., ['\r', '\n']).parse_next(s)?;
     let trimmed = rest.trim_end();
     let delim = &s.state.delimiter;
@@ -52,9 +62,16 @@ pub(crate) fn arg_rest(s: &mut Stream) -> winnow::ModalResult<InterpolatedText> 
 }
 
 /// Take remaining input as [`InterpolatedText`], or `None` if empty.
-/// Strips trailing delimiter.
 pub(crate) fn arg_rest_opt(s: &mut Stream) -> winnow::ModalResult<Option<InterpolatedText>> {
     let _ = ws(s);
+    if s.state.delimiter.is_empty() {
+        let rest: &str = winnow::token::rest.parse_next(s)?;
+        let trimmed = rest.trim_end();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(InterpolatedText::from(trimmed)));
+    }
     let rest = take_till(0.., ['\r', '\n']).parse_next(s)?;
     let trimmed = rest.trim_end();
     let delim = &s.state.delimiter;
@@ -70,9 +87,12 @@ pub(crate) fn arg_rest_opt(s: &mut Stream) -> winnow::ModalResult<Option<Interpo
 }
 
 /// Take remaining input as plain [`String`] (no interpolation).
-/// Strips trailing delimiter.
 pub(crate) fn arg_rest_literal(s: &mut Stream) -> winnow::ModalResult<String> {
     let _ = ws(s);
+    if s.state.delimiter.is_empty() {
+        let rest: &str = winnow::token::rest.parse_next(s)?;
+        return Ok(rest.trim_end().to_string());
+    }
     let rest = take_till(0.., ['\r', '\n']).parse_next(s)?;
     let trimmed = rest.trim_end();
     let delim = &s.state.delimiter;

@@ -231,16 +231,27 @@ fn parse_statement(stream: &mut Stream) -> winnow::ModalResult<Statement> {
                 winnow::error::ContextError::new(),
             ));
         }
-        // Reset to line start, consume "--" and whitespace
+        // Reset to line start. Wrap -- consumption + parse_command in with_span
+        // so span includes the -- prefix. Trailing newline is consumed outside.
         StreamTrait::reset(&mut stream.input, &start);
-        let _ = (
-            take_while(0.., [' ', '\t']),
-            "--",
-            take_while(0.., [' ', '\t']),
-        )
-            .parse_next(stream)?;
-        // parse_command handles all commands uniformly
-        return command::parse_command(stream).map_err(|e| e.cut());
+        let (mut stmt, range) = (|s: &mut Stream| -> winnow::ModalResult<Statement> {
+            let _ = (
+                take_while(0.., [' ', '\t']),
+                "--",
+                take_while(0.., [' ', '\t']),
+            )
+                .parse_next(s)?;
+            command::parse_command(s)
+        })
+        .with_span()
+        .parse_next(stream)
+        .map_err(|e| e.cut())?;
+
+        // Consume trailing newline (outside span)
+        let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
+
+        stmt.set_span(range_to_span(stream, range));
+        return Ok(stmt);
     }
 
     // Non-`--`: only special bare keywords are commands, everything else is SQL
@@ -252,7 +263,10 @@ fn parse_statement(stream: &mut Stream) -> winnow::ModalResult<Statement> {
 
     if is_bare_cmd {
         StreamTrait::reset(&mut stream.input, &start);
-        command::parse_command(stream).map_err(|e| e.cut())
+        let mut stmt = command::parse_command(stream).map_err(|e| e.cut())?;
+        // Consume trailing newline (outside span)
+        let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
+        Ok(stmt)
     } else {
         StreamTrait::reset(&mut stream.input, &start);
         parse_delimiter_terminated(stream, span).map_err(|e| parse_err_to_modal(&e))
@@ -539,15 +553,20 @@ fn parse_command_body(
     let first_word = parse_identifier(body.trim());
     match classify_command(first_word) {
         CommandKind::Known => {
-            // Build a sub-stream for parse_command (no "--" prefix needed)
+            // Build a sub-stream for parse_command.
+            // Delimiter is already stripped by parse_delimiter_terminated,
+            // so set it to empty string — this tells arg_rest to read to
+            // end of input (supports multi-line bare command bodies).
+            let real_delim = stream.state.delimiter.clone();
             let mut sub_stream = Stream {
                 input: LocatingSlice::new(body.trim()),
                 state: stream.state.clone(),
             };
+            sub_stream.state.delimiter.clear();
             let stmt = command::parse_command(&mut sub_stream)
                 .map_err(|e| modal_err_to_parse_err(e, span, "command body"))?;
-            // Propagate any state changes (e.g., delimiter)
-            stream.state.delimiter = sub_stream.state.delimiter;
+            // Preserve real delimiter (sub_stream's was cleared)
+            stream.state.delimiter = real_delim;
             Ok(stmt)
         }
         CommandKind::Unknown => Ok(Statement::Sql(SqlStatement {

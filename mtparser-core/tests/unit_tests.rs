@@ -65,6 +65,69 @@ fn test_let_literal() {
 }
 
 #[test]
+fn test_let_value_with_spaces_and_apostrophe() {
+    // Real-world: consecutive let lines where the first value
+    // contains spaces, apostrophe, and a dot-star wildcard.
+    let result = strict_parse(
+        "--let $grep_pattern=Can't generate a unique log-filename .*\n--let $grep_file=$error_log\n",
+    );
+    assert_eq!(result.len(), 2);
+    match &result[0] {
+        Statement::Let(c) => {
+            assert_eq!(c.variable, "grep_pattern");
+            match &c.value {
+                LetValue::Literal(s) => {
+                    assert_eq!(s, "Can't generate a unique log-filename .*");
+                }
+                other => panic!("expected Literal, got {:?}", other),
+            }
+        }
+        other => panic!("expected Let for line 1, got {:?}", other),
+    }
+    match &result[1] {
+        Statement::Let(c) => {
+            assert_eq!(c.variable, "grep_file");
+            match &c.value {
+                LetValue::Literal(s) => assert_eq!(s, "$error_log"),
+                other => panic!("expected Literal, got {:?}", other),
+            }
+        }
+        other => panic!("expected Let for line 2, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_let_consecutive_backtick_queries() {
+    // Real-world: two consecutive bare let commands with backtick SQL values
+    // containing single quotes and backslashes.
+    let result = strict_parse(
+        r"let $rcd= `SELECT REPLACE('$MYSQL_CHARSETSDIR', '\\\\\', '.')`;
+let $rcd= `SELECT REPLACE('$rcd', '/', '.')`;
+",
+    );
+    assert_eq!(result.len(), 2);
+    for (i, stmt) in result.iter().enumerate() {
+        match stmt {
+            Statement::Let(c) => {
+                assert_eq!(c.variable, "rcd");
+                match &c.value {
+                    LetValue::Query(q) => {
+                        assert!(
+                            q.query.starts_with("SELECT REPLACE("),
+                            "statement {}: expected SQL REPLACE, got: {}",
+                            i,
+                            q.query
+                        );
+                    }
+                    other => panic!("statement {}: expected Query, got {:?}", i, other),
+                }
+            }
+            other => panic!("statement {}: expected Let, got {:?}", i, other),
+        }
+    }
+}
+
+#[test]
 fn test_let_query() {
     let result = strict_parse("--let $result = `SELECT 1`\n");
     assert_eq!(result.len(), 1);
@@ -2745,6 +2808,24 @@ macro_rules! span_test {
 
 span_test!(test_span_echo, "--echo hello\n", Statement::Echo(_));
 span_test!(test_span_let, "--let $x = 5;\n", Statement::Let(_));
+
+#[test]
+fn test_span_excludes_trailing_newline() {
+    // Span should cover command content but NOT the trailing \n
+    let result = strict_parse("--echo hello\n");
+    let span = result[0].span();
+    // Input is "--echo hello\n" = 13 bytes
+    // Span should be 12 bytes ("--echo hello"), not 13
+    let source = "--echo hello\n";
+    let span_text = &source[span.offset..span.offset + span.len];
+    assert!(
+        !span_text.ends_with('\n'),
+        "span ends with \\n: span_text={:?}, len={}",
+        span_text,
+        span.len
+    );
+    assert_eq!(span.len, 12, "span should be 12 bytes (--echo hello), got {}", span.len);
+}
 span_test!(
     test_span_error,
     "--error ER_PARSE_ERROR\n",

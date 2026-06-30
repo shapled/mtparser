@@ -211,15 +211,12 @@ pub(crate) fn parse_command(stream: &mut Stream) -> ModalResult<Statement> {
                 return Err(winnow::error::ErrMode::Backtrack(err));
             }
         };
-
-        // Consume trailing whitespace + optional delimiter + newline
         let _: &str = take_while(0.., [' ', '\t']).parse_next(s)?;
         let delim = s.state.delimiter.clone();
         let remaining: &str = *s.input;
         if remaining.starts_with(&delim) {
             let _: &str = winnow::token::take(delim.len()).parse_next(s)?;
         }
-        let _: &str = take_while(0.., ['\r', '\n']).parse_next(s)?;
 
         Ok(stmt)
     })
