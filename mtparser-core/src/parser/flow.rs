@@ -9,8 +9,8 @@ use winnow::stream::LocatingSlice;
 use winnow::stream::Stream as StreamTrait;
 use winnow::token::{one_of, take_till, take_while};
 
-use crate::ast::Span;
 use crate::ast::expr::{ComparisonOp, ComparisonRhs, Expr, QueryExpr, VariableRef};
+use crate::parser::range_to_span;
 
 /// The unified stream type, re-imported for brevity.
 type Stream<'s> = crate::parser::Stream<'s>;
@@ -48,11 +48,13 @@ pub(crate) fn parse_condition_stream(stream: &mut Stream) -> winnow::ModalResult
         let _: winnow::ModalResult<char> = winnow::token::any.parse_next(stream);
     }
 
-    // Parse the inner content as a separate stream
+    // Parse the inner content as a separate stream.
+    // Set source to the inner text so range_to_span computes correct offsets.
     let mut inner_stream = Stream {
         input: LocatingSlice::new(inner),
         state: stream.state.clone(),
     };
+    inner_stream.state.source = inner.to_string();
 
     // Check for negation: !expr (optional)
     let negated: Option<char> = opt(one_of('!')).parse_next(&mut inner_stream)?;
@@ -95,9 +97,11 @@ fn parse_mariadb_closure(stream: &mut Stream) -> winnow::ModalResult<Expr> {
             winnow::error::ContextError::default(),
         ));
     }
-    let expr = preceded("$(", terminated(take_till(0.., [')']), ')')).parse_next(stream)?;
+    let (expr, range) = preceded("$(", terminated(take_till(0.., [')']), ')'))
+        .with_span()
+        .parse_next(stream)?;
     Ok(Expr::MariaDBClosure {
-        span: Span::dummy(),
+        span: range_to_span(stream, range),
         expression: expr.trim().to_string(),
     })
 }
@@ -115,8 +119,9 @@ fn parse_mariadb_logical(stream: &mut Stream) -> winnow::ModalResult<Expr> {
     let input: &str = *stream.input;
     for op in ["&&", "||"] {
         if let Some(_pos) = find_logical_op(input, op) {
+            let range = 0..input.len();
             return Ok(Expr::MariaDBLogical {
-                span: Span::dummy(),
+                span: range_to_span(stream, range),
                 expression: input.to_string(),
             });
         }
@@ -165,9 +170,11 @@ fn parse_comparison(stream: &mut Stream) -> winnow::ModalResult<Expr> {
 
 /// Parse a backtick query: ``SELECT ...``.
 fn parse_backtick_query(stream: &mut Stream) -> winnow::ModalResult<Expr> {
-    let query = preceded('`', terminated(take_till(0.., ['`']), '`')).parse_next(stream)?;
+    let (query, range) = preceded('`', terminated(take_till(0.., ['`']), '`'))
+        .with_span()
+        .parse_next(stream)?;
     Ok(Expr::Query(QueryExpr::new(
-        Span::dummy(),
+        range_to_span(stream, range),
         query.to_string(),
     )))
 }
@@ -187,10 +194,16 @@ fn parse_integer(stream: &mut Stream) -> winnow::ModalResult<Expr> {
 
 /// Parse a `$variable_name` reference.
 fn parse_variable(stream: &mut Stream) -> winnow::ModalResult<VariableRef> {
-    let _: char = one_of('$').parse_next(stream)?;
-    let name =
-        cut_err(take_while(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_', '-'))).parse_next(stream)?;
-    Ok(VariableRef::new(Span::dummy(), name.to_string()))
+    let (name, range) = preceded(
+        '$',
+        cut_err(take_while(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_', '-'))),
+    )
+    .with_span()
+    .parse_next(stream)?;
+    Ok(VariableRef::new(
+        range_to_span(stream, range),
+        name.to_string(),
+    ))
 }
 
 /// Parse the right-hand side of a comparison.
@@ -213,20 +226,25 @@ fn parse_rhs(stream: &mut Stream) -> winnow::ModalResult<ComparisonRhs> {
 
 /// Parse variable RHS: $name.
 fn parse_rhs_variable(stream: &mut Stream) -> winnow::ModalResult<ComparisonRhs> {
-    let _: char = one_of('$').parse_next(stream)?;
-    let name =
-        cut_err(take_while(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_', '-'))).parse_next(stream)?;
+    let (name, range) = preceded(
+        '$',
+        cut_err(take_while(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_', '-'))),
+    )
+    .with_span()
+    .parse_next(stream)?;
     Ok(ComparisonRhs::Variable(VariableRef::new(
-        Span::dummy(),
+        range_to_span(stream, range),
         name.to_string(),
     )))
 }
 
 /// Parse backtick query RHS: `SQL`.
 fn parse_rhs_backtick(stream: &mut Stream) -> winnow::ModalResult<ComparisonRhs> {
-    let query = preceded('`', terminated(take_till(0.., ['`']), '`')).parse_next(stream)?;
+    let (query, range) = preceded('`', terminated(take_till(0.., ['`']), '`'))
+        .with_span()
+        .parse_next(stream)?;
     Ok(ComparisonRhs::Query(QueryExpr::new(
-        Span::dummy(),
+        range_to_span(stream, range),
         query.to_string(),
     )))
 }

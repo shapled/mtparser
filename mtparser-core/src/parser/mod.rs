@@ -16,7 +16,7 @@ use std::ops::Range;
 
 use winnow::Parser;
 use winnow::combinator::repeat;
-use winnow::stream::{LocatingSlice, Stateful, Stream as StreamTrait};
+use winnow::stream::{LocatingSlice, Location, Stateful, Stream as StreamTrait};
 use winnow::token::{take_till, take_while};
 
 use crate::ast::span::Span;
@@ -263,7 +263,7 @@ fn parse_statement(stream: &mut Stream) -> winnow::ModalResult<Statement> {
 
     if is_bare_cmd {
         StreamTrait::reset(&mut stream.input, &start);
-        let mut stmt = command::parse_command(stream).map_err(|e| e.cut())?;
+        let stmt = command::parse_command(stream).map_err(|e| e.cut())?;
         // Consume trailing newline (outside span)
         let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
         Ok(stmt)
@@ -590,7 +590,7 @@ pub(crate) fn parse_cmd_if_args(
     stream: &mut Stream,
     is_while: bool,
 ) -> winnow::ModalResult<Statement> {
-    let span = Span::dummy();
+    let span_start = stream.input.current_token_start();
 
     // Read condition text from rest of current line
     let condition_line = take_till(0.., ['\r', '\n']).parse_next(stream)?;
@@ -612,7 +612,7 @@ pub(crate) fn parse_cmd_if_args(
                 vec![Statement::Empty]
             } else {
                 vec![Statement::Sql(SqlStatement {
-                    span,
+                    span: range_to_span(stream, span_start..stream.input.previous_token_end()),
                     sql: body_text.into(),
                 })]
             };
@@ -620,13 +620,13 @@ pub(crate) fn parse_cmd_if_args(
             let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
             return Ok(if is_while {
                 Statement::While(WhileBlock {
-                    span,
+                    span: range_to_span(stream, span_start..stream.input.previous_token_end()),
                     condition,
                     body,
                 })
             } else {
                 Statement::If(IfBlock {
-                    span,
+                    span: range_to_span(stream, span_start..stream.input.previous_token_end()),
                     condition,
                     body,
                 })
@@ -645,13 +645,13 @@ pub(crate) fn parse_cmd_if_args(
         consume_close_brace_modal(stream)?;
         return Ok(if is_while {
             Statement::While(WhileBlock {
-                span,
+                span: range_to_span(stream, span_start..stream.input.previous_token_end()),
                 condition,
                 body,
             })
         } else {
             Statement::If(IfBlock {
-                span,
+                span: range_to_span(stream, span_start..stream.input.previous_token_end()),
                 condition,
                 body,
             })
@@ -706,13 +706,13 @@ pub(crate) fn parse_cmd_if_args(
     consume_close_brace_modal(stream)?;
     Ok(if is_while {
         Statement::While(WhileBlock {
-            span,
+            span: range_to_span(stream, span_start..stream.input.previous_token_end()),
             condition,
             body,
         })
     } else {
         Statement::If(IfBlock {
-            span,
+            span: range_to_span(stream, span_start..stream.input.previous_token_end()),
             condition,
             body,
         })
@@ -721,7 +721,7 @@ pub(crate) fn parse_cmd_if_args(
 
 /// Parse write_file from stream positioned AFTER the command name.
 pub(crate) fn parse_cmd_write_file_args(stream: &mut Stream) -> winnow::ModalResult<Statement> {
-    let span = Span::dummy();
+    let span_start = stream.input.current_token_start();
     let delim = stream.state.delimiter.clone();
     let args = take_till(0.., ['\r', '\n']).parse_next(stream)?;
     let args = args
@@ -732,6 +732,7 @@ pub(crate) fn parse_cmd_write_file_args(stream: &mut Stream) -> winnow::ModalRes
     let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
     let (filename, end_marker) = parse_file_args(args).map_err(|e| parse_err_to_modal(&e))?;
     let content = read_until_end_marker(stream, &end_marker).map_err(|e| parse_err_to_modal(&e))?;
+    let span = range_to_span(stream, span_start..stream.input.previous_token_end());
     Ok(Statement::WriteFile(crate::ast::commands::WriteFileCmd {
         span,
         filename: filename.into(),
@@ -742,7 +743,7 @@ pub(crate) fn parse_cmd_write_file_args(stream: &mut Stream) -> winnow::ModalRes
 
 /// Parse append_file from stream positioned AFTER the command name.
 pub(crate) fn parse_cmd_append_file_args(stream: &mut Stream) -> winnow::ModalResult<Statement> {
-    let span = Span::dummy();
+    let span_start = stream.input.current_token_start();
     let delim = stream.state.delimiter.clone();
     let args = take_till(0.., ['\r', '\n']).parse_next(stream)?;
     let args = args
@@ -753,6 +754,7 @@ pub(crate) fn parse_cmd_append_file_args(stream: &mut Stream) -> winnow::ModalRe
     let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
     let (filename, end_marker) = parse_file_args(args).map_err(|e| parse_err_to_modal(&e))?;
     let content = read_until_end_marker(stream, &end_marker).map_err(|e| parse_err_to_modal(&e))?;
+    let span = range_to_span(stream, span_start..stream.input.previous_token_end());
     Ok(Statement::AppendFile(crate::ast::commands::AppendFileCmd {
         span,
         filename: filename.into(),
@@ -763,7 +765,7 @@ pub(crate) fn parse_cmd_append_file_args(stream: &mut Stream) -> winnow::ModalRe
 
 /// Parse perl block from stream positioned AFTER the command name.
 pub(crate) fn parse_cmd_perl_args(stream: &mut Stream) -> winnow::ModalResult<Statement> {
-    let span = Span::dummy();
+    let span_start = stream.input.current_token_start();
     let delim = stream.state.delimiter.clone();
     let args = take_till(0.., ['\r', '\n']).parse_next(stream)?;
     let args = args
@@ -778,6 +780,7 @@ pub(crate) fn parse_cmd_perl_args(stream: &mut Stream) -> winnow::ModalResult<St
     };
     let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
     let content = read_until_end_marker(stream, &end_marker).map_err(|e| parse_err_to_modal(&e))?;
+    let span = range_to_span(stream, span_start..stream.input.previous_token_end());
     Ok(Statement::Perl(PerlBlock {
         span,
         end_marker,

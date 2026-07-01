@@ -2842,6 +2842,72 @@ fn test_span_bare_command_offset_correct() {
         span1.offset
     );
 }
+
+#[test]
+fn test_span_all_commands_have_valid_span() {
+    let input = "\
+--echo hello\n\
+--let $x = 5\n\
+--error 1064\n\
+--source file.inc\n\
+--skip test\n\
+--exit\n\
+--exec ls\n\
+--sleep 1\n\
+--inc $x\n\
+--dec $x\n\
+--query SELECT 1\n\
+--eval SELECT $x\n\
+--horizontal_results\n\
+--vertical_results\n\
+--sorted_result\n\
+--replace_result 1 2\n\
+--replace_column 1 a b\n\
+--delimiter ;\n\
+--mkdir testdir\n\
+--copy_file a b\n\
+--connect(con1,localhost)\n\
+--change_user root\n\
+--reset_connection\n\
+--output /tmp/out\n\
+--shutdown_server\n\
+--ping\n\
+--enable_warnings\n\
+--disable_query_log\n\
+--character_set utf8\n\
+";
+    let result = strict_parse(input);
+    let dummy_count = result.iter().filter(|s| s.span().len == 0).count();
+    assert_eq!(dummy_count, 0, "{} statements have dummy span (len=0)", dummy_count);
+}
+
+#[test]
+fn test_span_if_block_has_valid_span() {
+    let result = strict_parse("if ($x)\n{\n  --echo hi\n}\n");
+    assert_eq!(result.len(), 1);
+    assert!(result[0].span().len > 0, "if block span should be non-dummy");
+}
+
+#[test]
+fn test_span_while_block_has_valid_span() {
+    let result = strict_parse("while ($x)\n{\n  --echo hi\n}\n");
+    assert_eq!(result.len(), 1);
+    assert!(result[0].span().len > 0, "while block span should be non-dummy");
+}
+
+#[test]
+fn test_span_condition_expr_has_valid_span() {
+    let result = strict_parse("if ($x == \"hello\")\n{\n}\n");
+    match &result[0] {
+        Statement::If(b) => match &b.condition {
+            Expr::Comparison { left, .. } => {
+                assert!(left.span.len > 0, "VariableRef span should be non-dummy, got len={}", left.span.len);
+            }
+            other => panic!("expected Comparison, got {:?}", other),
+        },
+        other => panic!("expected If, got {:?}", other),
+    }
+}
 span_test!(
     test_span_error,
     "--error ER_PARSE_ERROR\n",
