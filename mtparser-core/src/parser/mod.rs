@@ -563,8 +563,12 @@ fn parse_command_body(
                 state: stream.state.clone(),
             };
             sub_stream.state.delimiter.clear();
-            let stmt = command::parse_command(&mut sub_stream)
+            let mut stmt = command::parse_command(&mut sub_stream)
                 .map_err(|e| modal_err_to_parse_err(e, span, "command body"))?;
+            // Override span: sub_stream's LocatingSlice starts at offset 0,
+            // so parse_command computed an incorrect span. Use the span from
+            // the original stream (passed in by parse_delimiter_terminated).
+            stmt.set_span(span);
             // Preserve real delimiter (sub_stream's was cleared)
             stream.state.delimiter = real_delim;
             Ok(stmt)

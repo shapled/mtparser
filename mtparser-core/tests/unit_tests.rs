@@ -2826,6 +2826,22 @@ fn test_span_excludes_trailing_newline() {
     );
     assert_eq!(span.len, 12, "span should be 12 bytes (--echo hello), got {}", span.len);
 }
+
+#[test]
+fn test_span_bare_command_offset_correct() {
+    // Bare commands should have correct offset in source, not 0
+    let input = "echo hello;\necho world;\n";
+    let result = strict_parse(input);
+    assert_eq!(result.len(), 2);
+    let span0 = result[0].span();
+    let span1 = result[1].span();
+    assert_eq!(span0.offset, 0, "first statement offset should be 0");
+    assert_eq!(
+        span1.offset, 12,
+        "second statement offset should be 12, got {}",
+        span1.offset
+    );
+}
 span_test!(
     test_span_error,
     "--error ER_PARSE_ERROR\n",
