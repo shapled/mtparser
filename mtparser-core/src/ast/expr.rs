@@ -44,8 +44,8 @@ pub enum ComparisonOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum ComparisonRhs {
-    Integer(i64),
-    String(String),
+    Integer { value: i64, span: Span },
+    String { value: String, span: Span },
     Variable(VariableRef),
     Query(QueryExpr),
 }
@@ -57,15 +57,16 @@ pub enum Expr {
     /// $variable_name
     Variable(VariableRef),
     /// !expr — negation of any expression
-    Negated(Box<Expr>),
+    Negated { expr: Box<Expr>, span: Span },
     /// Integer literal
-    Integer(i64),
+    Integer { value: i64, span: Span },
     /// `SELECT ...`
     Query(QueryExpr),
     /// Variable ==|!=|<|<=|>|>= rhs
     Comparison {
         left: VariableRef,
         operator: ComparisonOp,
+        operator_span: Span,
         right: Box<ComparisonRhs>,
     },
     /// MariaDB: $(expr) arithmetic/logical expression, e.g. $(1 + 2), $($x > 0)

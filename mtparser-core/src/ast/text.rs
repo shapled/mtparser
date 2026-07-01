@@ -1,18 +1,23 @@
 use std::fmt;
 
+use crate::ast::Span;
+
 /// A segment within interpolated text: either a literal string or a variable reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum TextPart {
     /// Literal text (including escaped `\$` → `$`, and bare `$` before non-identifier chars).
-    Literal(String),
+    Literal { text: String, span: Span },
     /// A variable reference. Stores the variable name without the `$` prefix.
-    Variable(String),
+    /// Span covers the full `$name` token (including the `$`).
+    Variable { name: String, span: Span },
 }
 
 /// Text that may contain `$variable_name` references.
 ///
 /// Preserves structure for downstream tools that need to reason about variable usage.
+/// `base_offset` is the byte offset of this text within the original source, used to
+/// compute correct spans for each TextPart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct InterpolatedText(Vec<TextPart>);
@@ -20,34 +25,60 @@ pub struct InterpolatedText(Vec<TextPart>);
 impl InterpolatedText {
     /// Parse a raw string into an InterpolatedText, scanning for `$variable` references.
     ///
+    /// Spans are relative to the input string (offset 0 = start of `s`).
+    ///
     /// Scanning rules:
     /// - `\$` → `Literal("$")`
     /// - `$` followed by `[a-zA-Z_]` then `[a-zA-Z0-9_-]*` → `Variable(name)`
     /// - `$` followed by anything else → `Literal("$")`
     /// - all other chars → accumulated into `Literal`
     pub fn parse(s: &str) -> Self {
+        Self::parse_with_offset(s, 0)
+    }
+
+    /// Parse with a base offset for span computation.
+    /// `base_offset` is added to all span offsets.
+    pub fn parse_with_offset(s: &str, base_offset: usize) -> Self {
         let mut parts = Vec::new();
         let mut literal = String::new();
+        let mut literal_start = 0usize;
         let mut chars = s.char_indices().peekable();
 
-        while let Some(&(_, ch)) = chars.peek() {
+        // Helper to flush accumulated literal text
+        let flush_literal = |literal: &mut String, literal_start: &mut usize, parts: &mut Vec<TextPart>| {
+            if !literal.is_empty() {
+                let span = Span::new(1, 1, base_offset + *literal_start, literal.len());
+                parts.push(TextPart::Literal {
+                    text: std::mem::take(literal),
+                    span,
+                });
+                *literal_start = 0;
+            }
+        };
+
+        while let Some(&(byte_idx, ch)) = chars.peek() {
             if ch == '\\' {
-                // Check for \$
                 chars.next(); // consume '\'
                 if chars.peek().map(|&(_, c)| c) == Some('$') {
                     chars.next(); // consume '$'
+                    if literal.is_empty() {
+                        literal_start = byte_idx;
+                    }
                     literal.push('$');
                 } else {
+                    if literal.is_empty() {
+                        literal_start = byte_idx;
+                    }
                     literal.push('\\');
                 }
             } else if ch == '$' {
                 chars.next(); // consume '$'
                 if let Some(&(_, next_ch)) = chars.peek() {
                     if next_ch.is_ascii_alphabetic() || next_ch == '_' {
-                        // Start of a variable name
-                        if !literal.is_empty() {
-                            parts.push(TextPart::Literal(std::mem::take(&mut literal)));
-                        }
+                        // Start of a variable name — flush literal first
+                        flush_literal(&mut literal, &mut literal_start, &mut parts);
+
+                        let var_start = byte_idx; // includes the $
                         let mut name = String::new();
                         while let Some(&(_, c)) = chars.peek() {
                             if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
@@ -57,28 +88,41 @@ impl InterpolatedText {
                                 break;
                             }
                         }
-                        parts.push(TextPart::Variable(name));
+                        let var_len = name.len() + 1; // +1 for $
+                        parts.push(TextPart::Variable {
+                            name,
+                            span: Span::new(1, 1, base_offset + var_start, var_len),
+                        });
                     } else {
                         // `$` followed by non-identifier char → literal `$`
+                        if literal.is_empty() {
+                            literal_start = byte_idx;
+                        }
                         literal.push('$');
                     }
                 } else {
                     // `$` at end of string
+                    if literal.is_empty() {
+                        literal_start = byte_idx;
+                    }
                     literal.push('$');
                 }
             } else {
-                // Regular character — advance by byte offset to handle multi-byte chars
+                // Regular character
+                if literal.is_empty() {
+                    literal_start = byte_idx;
+                }
                 chars.next();
                 literal.push(ch);
             }
         }
 
+        // Flush remaining literal
         if !literal.is_empty() {
-            parts.push(TextPart::Literal(literal));
+            let span = Span::new(1, 1, base_offset + literal_start, literal.len());
+            parts.push(TextPart::Literal { text: literal, span });
         }
 
-        // Optimization: single literal → store as single-element vec
-        // (could use a dedicated SingleLiteral variant, but keeping it simple)
         InterpolatedText(parts)
     }
 
@@ -87,8 +131,8 @@ impl InterpolatedText {
         let mut s = String::new();
         for part in &self.0 {
             match part {
-                TextPart::Literal(lit) => s.push_str(lit),
-                TextPart::Variable(name) => {
+                TextPart::Literal { text, .. } => s.push_str(text),
+                TextPart::Variable { name, .. } => {
                     s.push('$');
                     s.push_str(name);
                 }
@@ -99,7 +143,7 @@ impl InterpolatedText {
 
     /// Return true if the text contains no variable references.
     pub fn is_literal(&self) -> bool {
-        self.0.iter().all(|p| matches!(p, TextPart::Literal(_)))
+        self.0.iter().all(|p| matches!(p, TextPart::Literal { .. }))
     }
 
     /// Access the parts slice.
@@ -112,7 +156,7 @@ impl InterpolatedText {
         self.0
             .iter()
             .filter_map(|p| match p {
-                TextPart::Variable(name) => Some(name.as_str()),
+                TextPart::Variable { name, .. } => Some(name.as_str()),
                 _ => None,
             })
             .collect()
@@ -122,8 +166,8 @@ impl InterpolatedText {
 impl fmt::Display for TextPart {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TextPart::Literal(s) => f.write_str(s),
-            TextPart::Variable(name) => write!(f, "${name}"),
+            TextPart::Literal { text, .. } => f.write_str(text),
+            TextPart::Variable { name, .. } => write!(f, "${name}"),
         }
     }
 }
@@ -181,8 +225,8 @@ mod tests {
         assert!(!t.is_literal());
         assert_eq!(t.to_raw_string(), "counter is $counter");
         assert_eq!(t.parts().len(), 2);
-        assert!(matches!(&t.parts()[0], TextPart::Literal(s) if s == "counter is "));
-        assert!(matches!(&t.parts()[1], TextPart::Variable(v) if v == "counter"));
+        assert!(matches!(&t.parts()[0], TextPart::Literal { text, .. } if text == "counter is "));
+        assert!(matches!(&t.parts()[1], TextPart::Variable { name, .. } if name == "counter"));
     }
 
     #[test]
@@ -245,5 +289,40 @@ mod tests {
         let t: InterpolatedText = "test $var".into();
         assert!(!t.is_literal());
         assert_eq!(t.variable_names(), vec!["var"]);
+    }
+
+    #[test]
+    fn test_span_offsets() {
+        let t = InterpolatedText::parse("ab$cd");
+        assert_eq!(t.parts().len(), 2);
+        match &t.parts()[0] {
+            TextPart::Literal { text, span } => {
+                assert_eq!(text, "ab");
+                assert_eq!(span.offset, 0);
+                assert_eq!(span.len, 2);
+            }
+            _ => panic!("expected Literal"),
+        }
+        match &t.parts()[1] {
+            TextPart::Variable { name, span } => {
+                assert_eq!(name, "cd");
+                assert_eq!(span.offset, 2);
+                assert_eq!(span.len, 3); // $cd = 3 bytes
+            }
+            _ => panic!("expected Variable"),
+        }
+    }
+
+    #[test]
+    fn test_span_with_base_offset() {
+        let t = InterpolatedText::parse_with_offset("ab$cd", 100);
+        match &t.parts()[0] {
+            TextPart::Literal { span, .. } => assert_eq!(span.offset, 100),
+            _ => panic!("expected Literal"),
+        }
+        match &t.parts()[1] {
+            TextPart::Variable { span, .. } => assert_eq!(span.offset, 102),
+            _ => panic!("expected Variable"),
+        }
     }
 }

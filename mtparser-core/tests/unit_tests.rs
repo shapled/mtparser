@@ -56,7 +56,7 @@ fn test_let_literal() {
         Statement::Let(c) => {
             assert_eq!(c.variable, "var");
             match &c.value {
-                LetValue::Literal(s) => assert_eq!(s, "hello"),
+                LetValue::Literal { value: s, .. } => assert_eq!(s, "hello"),
                 other => panic!("expected Literal, got {:?}", other),
             }
         }
@@ -76,7 +76,7 @@ fn test_let_value_with_spaces_and_apostrophe() {
         Statement::Let(c) => {
             assert_eq!(c.variable, "grep_pattern");
             match &c.value {
-                LetValue::Literal(s) => {
+                LetValue::Literal { value: s, .. } => {
                     assert_eq!(s, "Can't generate a unique log-filename .*");
                 }
                 other => panic!("expected Literal, got {:?}", other),
@@ -88,7 +88,7 @@ fn test_let_value_with_spaces_and_apostrophe() {
         Statement::Let(c) => {
             assert_eq!(c.variable, "grep_file");
             match &c.value {
-                LetValue::Literal(s) => assert_eq!(s, "$error_log"),
+                LetValue::Literal { value: s, .. } => assert_eq!(s, "$error_log"),
                 other => panic!("expected Literal, got {:?}", other),
             }
         }
@@ -392,7 +392,7 @@ fn test_if_negated_variable() {
     let result = strict_parse("--if (!$undefined)\n{\n  --echo var is not set\n}\n");
     match &result[0] {
         Statement::If(b) => {
-            assert!(matches!(&b.condition, Expr::Negated(_)));
+            assert!(matches!(&b.condition, Expr::Negated { .. }));
         }
         other => panic!("expected If, got {:?}", other),
     }
@@ -660,8 +660,8 @@ fn test_echo_with_variable() {
     match &result[0] {
         Statement::Echo(c) => {
             assert_eq!(c.text.parts().len(), 2);
-            assert!(matches!(&c.text.parts()[0], TextPart::Literal(s) if s == "counter is "));
-            assert!(matches!(&c.text.parts()[1], TextPart::Variable(v) if v == "counter"));
+            assert!(matches!(&c.text.parts()[0], TextPart::Literal { text: s, .. } if s == "counter is "));
+            assert!(matches!(&c.text.parts()[1], TextPart::Variable { name: v, .. } if v == "counter"));
             assert_eq!(c.text.to_raw_string(), "counter is $counter");
         }
         other => panic!("expected Echo, got {:?}", other),
@@ -945,7 +945,7 @@ fn parse_mariadb(input: &str) -> Vec<Statement> {
 fn test_condition_integer() {
     let result = strict_parse("--if (0)\n{\n  --echo zero\n}\n");
     match &result[0] {
-        Statement::If(b) => assert!(matches!(&b.condition, Expr::Integer(0))),
+        Statement::If(b) => assert!(matches!(&b.condition, Expr::Integer { value: 0, .. })),
         other => panic!("expected If, got {:?}", other),
     }
 }
@@ -959,7 +959,7 @@ fn test_condition_comparison_integer_rhs() {
                 operator, right, ..
             } => {
                 assert_eq!(*operator, ComparisonOp::Eq);
-                assert!(matches!(right.as_ref(), ComparisonRhs::Integer(1)));
+                assert!(matches!(right.as_ref(), ComparisonRhs::Integer { value: 1, .. }));
             }
             other => panic!("expected Comparison, got {:?}", other),
         },
@@ -973,7 +973,7 @@ fn test_condition_comparison_string_rhs() {
     match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::Comparison { right, .. } => {
-                assert!(matches!(right.as_ref(), ComparisonRhs::String(s) if s == "hello"));
+                assert!(matches!(right.as_ref(), ComparisonRhs::String { value: s, .. } if s == "hello"));
             }
             other => panic!("expected Comparison, got {:?}", other),
         },
@@ -1036,7 +1036,7 @@ fn test_condition_negated_integer() {
     let result = strict_parse("--if (!0)\n{\n}\n");
     match &result[0] {
         Statement::If(b) => match &b.condition {
-            Expr::Negated(inner) => assert!(matches!(inner.as_ref(), Expr::Integer(0))),
+            Expr::Negated { expr: inner, .. } => assert!(matches!(inner.as_ref(), Expr::Integer { value: 0, .. })),
             other => panic!("expected Negated, got {:?}", other),
         },
         other => panic!("expected If, got {:?}", other),
@@ -1048,7 +1048,7 @@ fn test_condition_negated_query() {
     let result = strict_parse("--if (!`SELECT 0`)\n{\n}\n");
     match &result[0] {
         Statement::If(b) => match &b.condition {
-            Expr::Negated(inner) => assert!(matches!(inner.as_ref(), Expr::Query(_))),
+            Expr::Negated { expr: inner, .. } => assert!(matches!(inner.as_ref(), Expr::Query(_))),
             other => panic!("expected Negated, got {:?}", other),
         },
         other => panic!("expected If, got {:?}", other),
@@ -1279,7 +1279,7 @@ fn test_inline_if_block() {
     let result = strict_parse("if (1) { --echo ok; }\n");
     match &result[0] {
         Statement::If(b) => {
-            assert!(matches!(&b.condition, Expr::Integer(1)));
+            assert!(matches!(&b.condition, Expr::Integer { value: 1, .. }));
             assert_eq!(b.body.len(), 1);
         }
         other => panic!("expected If, got {:?}", other),
@@ -3140,7 +3140,7 @@ fn test_span_empty_statement() {
 fn test_span_assert_constructed() {
     let stmt = Statement::Assert(AssertCmd {
         span: Span::new(3, 5, 100, 10),
-        expression: Expr::Integer(1),
+        expression: Expr::Integer { value: 1, span: Span::dummy() },
     });
     let span = stmt.span();
     assert_eq!(span.line, 3);
@@ -3903,7 +3903,7 @@ fn test_let_open_backtick() {
         Statement::Let(c) => {
             assert_eq!(c.variable, "x");
             match &c.value {
-                LetValue::Literal(s) => assert!(s.contains('`')),
+                LetValue::Literal { value: s, .. } => assert!(s.contains('`')),
                 other => panic!("expected Literal, got {:?}", other),
             }
         }
@@ -3952,7 +3952,7 @@ fn test_condition_comparison_integer_rhs_direct() {
     match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::Comparison { right, .. } => {
-                assert!(matches!(right.as_ref(), ComparisonRhs::Integer(42)));
+                assert!(matches!(right.as_ref(), ComparisonRhs::Integer { value: 42, .. }));
             }
             other => panic!("expected Comparison, got {:?}", other),
         },
@@ -3991,7 +3991,7 @@ fn test_condition_backtick_no_close() {
     match &result[0] {
         Statement::If(b) => match &b.condition {
             Expr::Comparison { right, .. } => {
-                assert!(matches!(right.as_ref(), ComparisonRhs::String(_)));
+                assert!(matches!(right.as_ref(), ComparisonRhs::String { .. }));
             }
             other => panic!("expected Comparison, got {:?}", other),
         },
@@ -4131,7 +4131,7 @@ fn test_visitor_exhaustive() {
     }));
     all_stmts.push(Statement::Assert(AssertCmd {
         span: Span::dummy(),
-        expression: Expr::Integer(1),
+        expression: Expr::Integer { value: 1, span: Span::dummy() },
     }));
     all_stmts.push(Statement::Empty);
 

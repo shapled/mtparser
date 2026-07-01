@@ -3,9 +3,12 @@
 //! All parsers operate on `crate::parser::Stream`, threading the `ParserState`
 //! (which carries the MySQL/MariaDB version) through the combinators.
 
+use std::ops::Range;
+
 use winnow::Parser;
 use winnow::combinator::{alt, cut_err, opt, preceded, terminated};
 use winnow::stream::LocatingSlice;
+use winnow::stream::Location;
 use winnow::stream::Stream as StreamTrait;
 use winnow::token::{one_of, take_till, take_while};
 
@@ -57,13 +60,17 @@ pub(crate) fn parse_condition_stream(stream: &mut Stream) -> winnow::ModalResult
     inner_stream.state.source = inner.to_string();
 
     // Check for negation: !expr (optional)
-    let negated: Option<char> = opt(one_of('!')).parse_next(&mut inner_stream)?;
+    // Capture the span of the '!' character using with_span
+    let (negated, not_range) = opt(one_of('!')).with_span().parse_next(&mut inner_stream)?;
     // Skip whitespace
     let _: winnow::ModalResult<&str> = take_while(0.., [' ', '\t']).parse_next(&mut inner_stream);
     let expr = parse_inner_expr.parse_next(&mut inner_stream)?;
 
     if negated.is_some() {
-        Ok(Expr::Negated(Box::new(expr)))
+        Ok(Expr::Negated {
+            expr: Box::new(expr),
+            span: range_to_span(&inner_stream, not_range),
+        })
     } else {
         Ok(expr)
     }
@@ -139,7 +146,7 @@ fn parse_comparison(stream: &mut Stream) -> winnow::ModalResult<Expr> {
     // Skip whitespace before operator
     let _: winnow::ModalResult<&str> = take_while(0.., [' ', '\t']).parse_next(stream);
     // Try to parse a comparison operator
-    let op_result: winnow::ModalResult<ComparisonOp> = alt((
+    let op_result: winnow::ModalResult<(ComparisonOp, Range<usize>)> = alt((
         "==".value(ComparisonOp::Eq),
         "!=".value(ComparisonOp::Neq),
         "<=".value(ComparisonOp::Le),
@@ -147,16 +154,18 @@ fn parse_comparison(stream: &mut Stream) -> winnow::ModalResult<Expr> {
         "<".value(ComparisonOp::Lt),
         ">".value(ComparisonOp::Gt),
     ))
+    .with_span()
     .parse_next(stream);
 
     match op_result {
-        Ok(op) => {
+        Ok((op, op_range)) => {
             // Skip whitespace after operator
             let _: winnow::ModalResult<&str> = take_while(0.., [' ', '\t']).parse_next(stream);
             let rhs = parse_rhs(stream)?;
             Ok(Expr::Comparison {
                 left: var,
                 operator: op,
+                operator_span: range_to_span(stream, op_range),
                 right: Box::new(rhs),
             })
         }
@@ -181,11 +190,16 @@ fn parse_backtick_query(stream: &mut Stream) -> winnow::ModalResult<Expr> {
 
 /// Parse an integer literal.
 fn parse_integer(stream: &mut Stream) -> winnow::ModalResult<Expr> {
-    let digits = take_while(1.., ('0'..='9',)).parse_next(stream)?;
+    let (digits, range) = take_while(1.., ('0'..='9',))
+        .with_span()
+        .parse_next(stream)?;
     let n: i64 = digits
         .parse()
         .map_err(|_| winnow::error::ErrMode::Backtrack(winnow::error::ContextError::default()))?;
-    Ok(Expr::Integer(n))
+    Ok(Expr::Integer {
+        value: n,
+        span: range_to_span(stream, range),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -208,20 +222,50 @@ fn parse_variable(stream: &mut Stream) -> winnow::ModalResult<VariableRef> {
 
 /// Parse the right-hand side of a comparison.
 fn parse_rhs(stream: &mut Stream) -> winnow::ModalResult<ComparisonRhs> {
-    alt((
-        // Integer: digits → i64
+    // Try integer first
+    let checkpoint = StreamTrait::checkpoint(&stream.input);
+    let int_result: winnow::ModalResult<(&str, Range<usize>)> =
         take_while(1.., ('0'..='9',))
-            .map(|s: &str| ComparisonRhs::Integer(s.parse::<i64>().unwrap_or(0))),
-        // Variable: $name
-        parse_rhs_variable,
-        // Backtick query: `SQL`
-        parse_rhs_backtick,
-        // Quote-delimited string: "value" or 'value'
-        parse_rhs_quoted_string,
-        // Bare string (fallback)
-        take_till(0.., ['\r', '\n', ';', ')']).map(|s: &str| ComparisonRhs::String(s.to_string())),
-    ))
-    .parse_next(stream)
+            .with_span()
+            .parse_next(stream);
+    if let Ok((s, range)) = int_result {
+        let value = s.parse::<i64>().unwrap_or(0);
+        return Ok(ComparisonRhs::Integer {
+            value,
+            span: range_to_span(stream, range),
+        });
+    }
+    StreamTrait::reset(&mut stream.input, &checkpoint);
+
+    // Try variable
+    let var_result = parse_rhs_variable.parse_next(stream);
+    if var_result.is_ok() {
+        return var_result;
+    }
+    StreamTrait::reset(&mut stream.input, &checkpoint);
+
+    // Try backtick query
+    let bt_result = parse_rhs_backtick.parse_next(stream);
+    if bt_result.is_ok() {
+        return bt_result;
+    }
+    StreamTrait::reset(&mut stream.input, &checkpoint);
+
+    // Try quoted string
+    let qs_result = parse_rhs_quoted_string.parse_next(stream);
+    if qs_result.is_ok() {
+        return qs_result;
+    }
+    StreamTrait::reset(&mut stream.input, &checkpoint);
+
+    // Bare string (fallback)
+    let (s, range) = take_till(0.., ['\r', '\n', ';', ')'])
+        .with_span()
+        .parse_next(stream)?;
+    Ok(ComparisonRhs::String {
+        value: s.to_string(),
+        span: range_to_span(stream, range),
+    })
 }
 
 /// Parse variable RHS: $name.
@@ -252,9 +296,14 @@ fn parse_rhs_backtick(stream: &mut Stream) -> winnow::ModalResult<ComparisonRhs>
 /// Parse quoted string RHS: "value" or 'value'.
 fn parse_rhs_quoted_string(stream: &mut Stream) -> winnow::ModalResult<ComparisonRhs> {
     let quote: char = one_of(['"', '\'']).parse_next(stream)?;
+    let content_start = stream.input.current_token_start();
     let content = take_till(0.., [quote]).parse_next(stream)?;
+    let content_end = stream.input.previous_token_end();
     let _: char = one_of([quote]).parse_next(stream)?;
-    Ok(ComparisonRhs::String(content.to_string()))
+    Ok(ComparisonRhs::String {
+        value: content.to_string(),
+        span: range_to_span(stream, content_start..content_end),
+    })
 }
 
 /// Find the first occurrence of any character in `chars` within `s`.

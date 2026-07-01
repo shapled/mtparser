@@ -44,7 +44,7 @@ pub struct LetCmd {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum LetValue {
-    Literal(String),
+    Literal { value: String, span: Span },
     Query(QueryExpr),
 }
 

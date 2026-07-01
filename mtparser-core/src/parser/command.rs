@@ -5,7 +5,8 @@
 //! for case-insensitive command name routing.
 
 use winnow::Parser;
-use winnow::combinator::{alt, delimited, opt, preceded, terminated};
+use winnow::combinator::{alt, delimited, opt, preceded};
+use winnow::stream::Stream as StreamTrait;
 use winnow::token::{one_of, take_till, take_while};
 
 use crate::ast::Span;
@@ -406,6 +407,14 @@ fn parse_cmd_expr_args(s: &mut Stream) -> ModalResult<Statement> {
 // Assignment
 // ---------------------------------------------------------------------------
 
+/// Parse a backtick-enclosed query for `let` value. Returns the inner query string.
+fn parse_let_backtick_query<'s>(s: &mut Stream<'s>) -> winnow::ModalResult<&'s str> {
+    let _: char = one_of('`').parse_next(s)?;
+    let q = take_till(0.., ['`']).parse_next(s)?;
+    let _: char = one_of('`').parse_next(s)?;
+    Ok(q)
+}
+
 fn parse_cmd_let_args(s: &mut Stream) -> ModalResult<Statement> {
     let ((variable, value), range) = (|s: &mut Stream| -> ModalResult<(String, LetValue)> {
         let _ = arg::ws(s)?;
@@ -423,12 +432,24 @@ fn parse_cmd_let_args(s: &mut Stream) -> ModalResult<Statement> {
         )?;
         let _ = arg::ws(s)?;
         // Value: backtick query or literal
-        let value = alt((
-            preceded('`', terminated(take_till(0.., ['`']), '`'))
-                .map(|q: &str| LetValue::Query(QueryExpr::new(Span::new(0, 0, 0, q.len()), q.to_string()))),
-            take_till(0.., ['\r', '\n']).map(|v: &str| LetValue::Literal(v.trim_end().to_string())),
-        ))
-        .parse_next(s)?;
+        // Try backtick query first; if it fails (no closing backtick), fall back to literal
+        let checkpoint = StreamTrait::checkpoint(&s.input);
+        let bt_result = parse_let_backtick_query(s);
+        let value = match bt_result {
+            Ok(q) => {
+                LetValue::Query(QueryExpr::new(Span::new(0, 0, 0, q.len()), q.to_string()))
+            }
+            Err(_) => {
+                StreamTrait::reset(&mut s.input, &checkpoint);
+                let (v, r) = take_till(0.., ['\r', '\n'])
+                    .with_span()
+                    .parse_next(s)?;
+                LetValue::Literal {
+                    value: v.trim_end().to_string(),
+                    span: range_to_span(s, r),
+                }
+            }
+        };
         Ok((var.to_string(), value))
     })
     .with_span()
