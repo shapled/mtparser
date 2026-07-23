@@ -7,7 +7,7 @@
 use winnow::Parser;
 use winnow::combinator::{alt, delimited, opt, preceded};
 use winnow::stream::Stream as StreamTrait;
-use winnow::token::{one_of, take_till, take_while};
+use winnow::token::{one_of, take, take_till, take_while};
 
 use crate::ast::Span;
 use crate::ast::commands::*;
@@ -26,6 +26,28 @@ fn cut_err_msg(msg: &'static str) -> winnow::error::ErrMode<winnow::error::Conte
         winnow::error::StrContextValue::Description(msg),
     ));
     winnow::error::ErrMode::Cut(err)
+}
+
+/// Build an `InterpolatedText` from a token slice and its byte range, applying
+/// quote stripping and computing the correct absolute source offset.
+/// `range` is stream-relative; `base_offset` is `state.base_offset`.
+fn itext_from_token(
+    token: &str,
+    range: &std::ops::Range<usize>,
+    base_offset: usize,
+) -> InterpolatedText {
+    let (content, off) = strip_quotes_with_offset(token);
+    InterpolatedText::parse_with_offset(content, range.start + off + base_offset)
+}
+
+/// Compute the overall byte range covering all tokens (first start .. last end).
+fn tokens_overall_range(
+    tokens: &[(&str, std::ops::Range<usize>)],
+) -> std::ops::Range<usize> {
+    match (tokens.first(), tokens.last()) {
+        (Some((_, first)), Some((_, last))) => first.start..last.end,
+        _ => 0..0,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -241,15 +263,14 @@ fn parse_cmd_echo_args(s: &mut Stream) -> ModalResult<Statement> {
 }
 
 fn parse_cmd_source_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (file, range) = (|s: &mut Stream| -> ModalResult<String> {
-        let _ = arg::ws(s)?;
-        Ok(arg::arg_token(s).unwrap_or("").to_string())
-    })
-    .with_span()
-    .parse_next(s)?;
+    use winnow::stream::Location;
+    let _ = arg::ws(s)?;
+    let token_start = s.input.current_token_start();
+    let file = arg::arg_token(s).unwrap_or("");
+    let token_end = s.input.previous_token_end();
     Ok(Statement::Source(SourceCmd {
-        span: range_to_span(s, range),
-        file: file.into(),
+        span: range_to_span(s, token_start..token_end),
+        file: InterpolatedText::parse_with_offset(file, token_start + s.state.base_offset),
     }))
 }
 
@@ -320,22 +341,21 @@ fn parse_cmd_reap_args(s: &mut Stream) -> ModalResult<Statement> {
     let (_, range) = (|_s: &mut Stream| -> ModalResult<()> { Ok(()) })
         .with_span()
         .parse_next(s)?;
+
     Ok(Statement::Reap(ReapCmd {
         span: range_to_span(s, range),
     }))
 }
 
 fn parse_cmd_output_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (file, range) = (|s: &mut Stream| -> ModalResult<String> {
-        let _ = arg::ws(s)?;
-        let f = strip_quotes(take_till(0.., ['\r', '\n']).parse_next(s)?.trim_end());
-        Ok(f.to_string())
-    })
-    .with_span()
-    .parse_next(s)?;
+    use winnow::stream::Location;
+    let _ = arg::ws(s)?;
+    let token_start = s.input.current_token_start();
+    let f = strip_quotes(take_till(0.., ['\r', '\n']).parse_next(s)?.trim_end());
+    let token_end = s.input.previous_token_end();
     Ok(Statement::Output(OutputCmd {
-        span: range_to_span(s, range),
-        file: file.into(),
+        span: range_to_span(s, token_start..token_end),
+        file: InterpolatedText::parse_with_offset(f, token_start + s.state.base_offset),
     }))
 }
 
@@ -354,6 +374,7 @@ fn parse_cmd_inc_args(s: &mut Stream) -> ModalResult<Statement> {
     })
     .with_span()
     .parse_next(s)?;
+
     Ok(Statement::Inc(IncCmd {
         span: range_to_span(s, range),
         variable: var,
@@ -371,6 +392,7 @@ fn parse_cmd_dec_args(s: &mut Stream) -> ModalResult<Statement> {
     })
     .with_span()
     .parse_next(s)?;
+
     Ok(Statement::Dec(DecCmd {
         span: range_to_span(s, range),
         variable: var,
@@ -396,6 +418,7 @@ fn parse_cmd_expr_args(s: &mut Stream) -> ModalResult<Statement> {
     })
     .with_span()
     .parse_next(s)?;
+
     Ok(Statement::Expr(ExprCmd {
         span: range_to_span(s, range),
         variable: var,
@@ -408,11 +431,16 @@ fn parse_cmd_expr_args(s: &mut Stream) -> ModalResult<Statement> {
 // ---------------------------------------------------------------------------
 
 /// Parse a backtick-enclosed query for `let` value. Returns the inner query string.
-fn parse_let_backtick_query<'s>(s: &mut Stream<'s>) -> winnow::ModalResult<&'s str> {
+fn parse_let_backtick_query<'s>(
+    s: &mut Stream<'s>,
+) -> winnow::ModalResult<(&'s str, std::ops::Range<usize>)> {
+    use winnow::stream::Location;
+    let start = s.input.current_token_start();
     let _: char = one_of('`').parse_next(s)?;
     let q = take_till(0.., ['`']).parse_next(s)?;
     let _: char = one_of('`').parse_next(s)?;
-    Ok(q)
+    let end = s.input.previous_token_end();
+    Ok((q, start..end))
 }
 
 fn parse_cmd_let_args(s: &mut Stream) -> ModalResult<Statement> {
@@ -436,17 +464,39 @@ fn parse_cmd_let_args(s: &mut Stream) -> ModalResult<Statement> {
         let checkpoint = StreamTrait::checkpoint(&s.input);
         let bt_result = parse_let_backtick_query(s);
         let value = match bt_result {
-            Ok(q) => {
-                LetValue::Query(QueryExpr::new(Span::new(0, 0, 0, q.len()), q.to_string()))
+            Ok((q, bt_range)) => {
+                LetValue::Query(QueryExpr::new(range_to_span(s, bt_range), q.to_string()))
             }
             Err(_) => {
                 StreamTrait::reset(&mut s.input, &checkpoint);
-                let (v, r) = take_till(0.., ['\r', '\n'])
-                    .with_span()
-                    .parse_next(s)?;
-                LetValue::Literal {
-                    value: v.trim_end().to_string(),
-                    span: range_to_span(s, r),
+                // Try query_get_value function call; Backtrack → fall back to Literal.
+                match parse_query_get_value_call(s) {
+                    Ok(call) => LetValue::QueryGetValue(call),
+                    Err(_) => {
+                        StreamTrait::reset(&mut s.input, &checkpoint);
+                        // Read value: when delimiter is empty (bare command body),
+                        // read ALL remaining content to support multi-line values.
+                        // Otherwise read until newline (single-line -- command).
+                        let (value_str, value_range) = if s.state.delimiter.is_empty() {
+                            let (rest, range) =
+                                winnow::token::rest::<_, winnow::error::ErrMode<winnow::error::ContextError>>
+                                    .with_span()
+                                    .parse_next(s)?;
+                            let trimmed = rest.trim_end();
+                            let trimmed_range = range.start..range.start + trimmed.len();
+                            (trimmed.to_string(), trimmed_range)
+                        } else {
+                            let (rest, range) =
+                                take_till(0.., ['\r', '\n']).with_span().parse_next(s)?;
+                            let trimmed = rest.trim_end();
+                            let trimmed_range = range.start..range.start + trimmed.len();
+                            (trimmed.to_string(), trimmed_range)
+                        };
+                        LetValue::Literal {
+                            value: value_str,
+                            span: range_to_span(s, value_range),
+                        }
+                    }
                 }
             }
         };
@@ -460,6 +510,138 @@ fn parse_cmd_let_args(s: &mut Stream) -> ModalResult<Statement> {
         variable,
         value,
     }))
+}
+
+/// Find the byte position of the next top-level comma or close paren in `bytes`.
+/// Quote-aware: if the first byte is a quote char, skip to the matching close
+/// quote before searching for the delimiter.
+fn find_arg_end_pos(bytes: &[u8]) -> usize {
+    if let Some(&quote) = bytes.first() {
+        if quote == b'\'' || quote == b'"' || quote == b'`' {
+            // Find matching close quote.
+            let mut i = 1;
+            while i < bytes.len() && bytes[i] != quote {
+                i += 1;
+            }
+            // Scan past close quote to find comma or ')'.
+            i += 1;
+            while i < bytes.len() && bytes[i] != b',' && bytes[i] != b')' {
+                i += 1;
+            }
+            return i;
+        }
+    }
+    // Unquoted: find comma or close paren directly.
+    let mut i = 0;
+    while i < bytes.len() && bytes[i] != b',' && bytes[i] != b')' {
+        i += 1;
+    }
+    i
+}
+
+/// Strip surrounding quotes from a trimmed arg value.
+/// Returns `(inner_content, base_offset)` where `base_offset` is the offset
+/// of the content after the opening quote. If no quotes, returns unchanged.
+fn strip_arg_quotes<'a>(trimmed: &'a str, trimmed_start: usize) -> (&'a str, usize) {
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 2 {
+        let q = bytes[0];
+        if (q == b'\'' || q == b'"' || q == b'`') && bytes[bytes.len() - 1] == q {
+            return (&trimmed[1..trimmed.len() - 1], trimmed_start + 1);
+        }
+    }
+    (trimmed, trimmed_start)
+}
+
+/// Parse `query_get_value(query, column, row [, resultset])` function call.
+/// The stream must be positioned at or before the function name.
+fn parse_query_get_value_call(s: &mut Stream) -> ModalResult<QueryGetValueCall> {
+    use winnow::stream::Location;
+    let base = s.state.base_offset;
+
+    // 1. Function name — backtrack if not query_get_value.
+    let _ = arg::ws(s)?;
+    let fn_start = s.input.current_token_start();
+    let name = take_while(1.., ('a'..='z', 'A'..='Z', '0'..='9', '_')).parse_next(s)?;
+    if !name.eq_ignore_ascii_case("query_get_value") {
+        return Err(winnow::error::ErrMode::Backtrack(
+            winnow::error::ContextError::new(),
+        ));
+    }
+    let fn_end = s.input.previous_token_end();
+    let function_name_span = range_to_span(s, fn_start..fn_end);
+
+    // 2. Opening paren.
+    let _ = arg::ws(s)?;
+    let open_start = s.input.current_token_start();
+    let _: char = one_of('(').parse_next(s)?;
+    let open_end = s.input.previous_token_end();
+    let open_paren_span = range_to_span(s, open_start..open_end);
+
+    // 3. Parse arguments with quote-aware comma splitting.
+    let mut arguments = Vec::new();
+    let mut commas = Vec::new();
+
+    loop {
+        let _ = arg::ws(s)?;
+        let arg_offset = s.input.current_token_start();
+        let remaining = *s.input;
+        let bytes = remaining.as_bytes();
+
+        // Empty args or immediate close paren.
+        if bytes.first() == Some(&b')') {
+            break;
+        }
+
+        // Find arg end (quote-aware).
+        let end_pos = find_arg_end_pos(bytes);
+
+        // Raw arg text and trimmed version.
+        let raw = &remaining[..end_pos];
+        let trimmed = raw.trim();
+        let leading = raw.len() - raw.trim_start().len();
+        let span_start = arg_offset + leading;
+        let span_end = span_start + trimmed.len();
+
+        // Strip quotes for InterpolatedText value.
+        let (value_str, value_base) = strip_arg_quotes(trimmed, span_start);
+
+        arguments.push(QueryGetValueArg {
+            span: range_to_span(s, span_start..span_end),
+            value: InterpolatedText::parse_with_offset(value_str, value_base + base),
+        });
+
+        // Consume the raw arg bytes from the stream.
+        let _: &str = take(end_pos).parse_next(s)?;
+
+        // Skip whitespace, then check for comma or close paren.
+        let _ = arg::ws(s)?;
+        let after = *s.input;
+        if after.as_bytes().first() == Some(&b',') {
+            let comma_start = s.input.current_token_start();
+            let _: char = one_of(',').parse_next(s)?;
+            let comma_end = s.input.previous_token_end();
+            commas.push(range_to_span(s, comma_start..comma_end));
+        } else {
+            break;
+        }
+    }
+
+    // 4. Closing paren.
+    let _ = arg::ws(s)?;
+    let close_start = s.input.current_token_start();
+    let _: char = one_of(')').parse_next(s)?;
+    let close_end = s.input.previous_token_end();
+    let close_paren_span = range_to_span(s, close_start..close_end);
+
+    Ok(QueryGetValueCall {
+        span: range_to_span(s, fn_start..close_end),
+        function_name_span,
+        open_paren_span,
+        close_paren_span,
+        arguments,
+        commas,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +662,7 @@ fn parse_cmd_error_args(s: &mut Stream) -> ModalResult<Statement> {
     })
     .with_span()
     .parse_next(s)?;
+
     Ok(Statement::Error(ErrorCmd {
         span: range_to_span(s, range),
         error_codes: codes,
@@ -487,48 +670,49 @@ fn parse_cmd_error_args(s: &mut Stream) -> ModalResult<Statement> {
 }
 
 fn parse_cmd_connect_args(s: &mut Stream) -> ModalResult<Statement> {
-    let ((name, params), range) = (|s: &mut Stream| -> ModalResult<(Option<InterpolatedText>, ConnectParams)> {
-        let _ = arg::ws(s)?;
-        // Try parenthesized form first
-        let paren_result: ModalResult<Vec<&str>> = delimited(
-            one_of('('),
-            arg::arg_comma_list(take_till(0.., [',', ')'])),
-            one_of(')'),
-        )
-        .parse_next(s);
+    let ((name, params), range) =
+        (|s: &mut Stream| -> ModalResult<(Option<InterpolatedText>, ConnectParams)> {
+            let _ = arg::ws(s)?;
+            // Try parenthesized form first
+            let paren_result: ModalResult<Vec<&str>> = delimited(
+                one_of('('),
+                arg::arg_comma_list(take_till(0.., [',', ')'])),
+                one_of(')'),
+            )
+            .parse_next(s);
 
-        match paren_result {
-            Ok(parts) => {
-                let name = parts.first().map(|p| InterpolatedText::from(p.trim()));
-                let mut params = ConnectParams::default();
-                if let Some(h) = parts.get(1) {
-                    params.host = Some(h.trim().into());
+            match paren_result {
+                Ok(parts) => {
+                    let name = parts.first().map(|p| InterpolatedText::from(p.trim()));
+                    let mut params = ConnectParams::default();
+                    if let Some(h) = parts.get(1) {
+                        params.host = Some(h.trim().into());
+                    }
+                    if let Some(u) = parts.get(2) {
+                        params.user = Some(u.trim().into());
+                    }
+                    if let Some(p) = parts.get(3) {
+                        params.password = Some(p.trim().into());
+                    }
+                    if let Some(d) = parts.get(4) {
+                        params.database = Some(d.trim().into());
+                    }
+                    if let Some(p) = parts.get(5) {
+                        params.port = Some(p.trim().into());
+                    }
+                    if let Some(so) = parts.get(6) {
+                        params.socket = Some(so.trim().into());
+                    }
+                    Ok((name, params))
                 }
-                if let Some(u) = parts.get(2) {
-                    params.user = Some(u.trim().into());
+                Err(_) => {
+                    let name = arg::arg_rest(s)?;
+                    Ok((Some(name), ConnectParams::default()))
                 }
-                if let Some(p) = parts.get(3) {
-                    params.password = Some(p.trim().into());
-                }
-                if let Some(d) = parts.get(4) {
-                    params.database = Some(d.trim().into());
-                }
-                if let Some(p) = parts.get(5) {
-                    params.port = Some(p.trim().into());
-                }
-                if let Some(so) = parts.get(6) {
-                    params.socket = Some(so.trim().into());
-                }
-                Ok((name, params))
             }
-            Err(_) => {
-                let name = arg::arg_rest(s)?;
-                Ok((Some(name), ConnectParams::default()))
-            }
-        }
-    })
-    .with_span()
-    .parse_next(s)?;
+        })
+        .with_span()
+        .parse_next(s)?;
 
     Ok(Statement::Connect(ConnectCmd {
         span: range_to_span(s, range),
@@ -539,6 +723,7 @@ fn parse_cmd_connect_args(s: &mut Stream) -> ModalResult<Statement> {
 
 fn parse_cmd_connection_args(s: &mut Stream) -> ModalResult<Statement> {
     let (name, range) = preceded(arg::ws, arg::arg_rest).with_span().parse_next(s)?;
+
     Ok(Statement::Connection(ConnectionCmd {
         span: range_to_span(s, range),
         name,
@@ -547,6 +732,7 @@ fn parse_cmd_connection_args(s: &mut Stream) -> ModalResult<Statement> {
 
 fn parse_cmd_disconnect_args(s: &mut Stream) -> ModalResult<Statement> {
     let (name, range) = preceded(arg::ws, arg::arg_rest).with_span().parse_next(s)?;
+
     Ok(Statement::Disconnect(DisconnectCmd {
         span: range_to_span(s, range),
         name,
@@ -572,6 +758,7 @@ fn parse_cmd_change_user_args(s: &mut Stream) -> ModalResult<Statement> {
     })
     .with_span()
     .parse_next(s)?;
+
     Ok(Statement::ChangeUser(ChangeUserCmd {
         span: range_to_span(s, range),
         user,
@@ -584,6 +771,7 @@ fn parse_cmd_reset_conn_args(s: &mut Stream) -> ModalResult<Statement> {
     let (_, range) = (|_s: &mut Stream| -> ModalResult<()> { Ok(()) })
         .with_span()
         .parse_next(s)?;
+
     Ok(Statement::ResetConnection(ResetConnectionCmd {
         span: range_to_span(s, range),
     }))
@@ -595,6 +783,7 @@ fn parse_cmd_reset_conn_args(s: &mut Stream) -> ModalResult<Statement> {
 
 fn parse_cmd_query_args(s: &mut Stream) -> ModalResult<Statement> {
     let (sql, range) = preceded(arg::ws, arg::arg_rest).with_span().parse_next(s)?;
+
     Ok(Statement::Query(QueryCmd {
         span: range_to_span(s, range),
         sql,
@@ -603,6 +792,7 @@ fn parse_cmd_query_args(s: &mut Stream) -> ModalResult<Statement> {
 
 fn parse_cmd_eval_args(s: &mut Stream) -> ModalResult<Statement> {
     let (sql, range) = preceded(arg::ws, arg::arg_rest).with_span().parse_next(s)?;
+
     Ok(Statement::Eval(EvalCmd {
         span: range_to_span(s, range),
         sql,
@@ -611,6 +801,7 @@ fn parse_cmd_eval_args(s: &mut Stream) -> ModalResult<Statement> {
 
 fn parse_cmd_send_args(s: &mut Stream) -> ModalResult<Statement> {
     let (sql, range) = preceded(arg::ws, arg::arg_rest).with_span().parse_next(s)?;
+
     Ok(Statement::Send(SendCmd {
         span: range_to_span(s, range),
         sql,
@@ -619,6 +810,7 @@ fn parse_cmd_send_args(s: &mut Stream) -> ModalResult<Statement> {
 
 fn parse_cmd_send_eval_args(s: &mut Stream) -> ModalResult<Statement> {
     let (sql, range) = preceded(arg::ws, arg::arg_rest).with_span().parse_next(s)?;
+
     Ok(Statement::SendEval(SendEvalCmd {
         span: range_to_span(s, range),
         sql,
@@ -627,6 +819,7 @@ fn parse_cmd_send_eval_args(s: &mut Stream) -> ModalResult<Statement> {
 
 fn parse_cmd_query_vertical_args(s: &mut Stream) -> ModalResult<Statement> {
     let (sql, range) = preceded(arg::ws, arg::arg_rest).with_span().parse_next(s)?;
+
     Ok(Statement::QueryVertical(QueryVerticalCmd {
         span: range_to_span(s, range),
         sql,
@@ -635,6 +828,7 @@ fn parse_cmd_query_vertical_args(s: &mut Stream) -> ModalResult<Statement> {
 
 fn parse_cmd_ps_prepare_args(s: &mut Stream) -> ModalResult<Statement> {
     let (sql, range) = preceded(arg::ws, arg::arg_rest).with_span().parse_next(s)?;
+
     Ok(Statement::PsPrepare(PsPrepareCmd {
         span: range_to_span(s, range),
         sql,
@@ -643,6 +837,7 @@ fn parse_cmd_ps_prepare_args(s: &mut Stream) -> ModalResult<Statement> {
 
 fn parse_cmd_ps_bind_args(s: &mut Stream) -> ModalResult<Statement> {
     let (name, range) = preceded(arg::ws, arg::arg_rest).with_span().parse_next(s)?;
+
     Ok(Statement::PsBind(PsBindCmd {
         span: range_to_span(s, range),
         name,
@@ -654,11 +849,13 @@ fn parse_cmd_ps_bind_args(s: &mut Stream) -> ModalResult<Statement> {
 // ---------------------------------------------------------------------------
 
 fn parse_cmd_replace_result_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (pairs, range) = (|s: &mut Stream| -> ModalResult<Vec<(InterpolatedText, InterpolatedText)>> {
-        Ok(arg::arg_kv_pairs(s)?)
-    })
-    .with_span()
-    .parse_next(s)?;
+    let (pairs, range) =
+        (|s: &mut Stream| -> ModalResult<Vec<(InterpolatedText, InterpolatedText)>> {
+            Ok(arg::arg_kv_pairs(s)?)
+        })
+        .with_span()
+        .parse_next(s)?;
+
     Ok(Statement::ReplaceResult(ReplaceResultCmd {
         span: range_to_span(s, range),
         replacements: pairs,
@@ -680,6 +877,7 @@ fn parse_cmd_replace_column_args(s: &mut Stream) -> ModalResult<Statement> {
     })
     .with_span()
     .parse_next(s)?;
+
     Ok(Statement::ReplaceColumn(ReplaceColumnCmd {
         span: range_to_span(s, range),
         replacements,
@@ -690,6 +888,7 @@ fn parse_cmd_sorted_result_args(s: &mut Stream) -> ModalResult<Statement> {
     let (_, range) = (|_s: &mut Stream| -> ModalResult<()> { Ok(()) })
         .with_span()
         .parse_next(s)?;
+
     Ok(Statement::SortedResult(SortedResultCmd {
         span: range_to_span(s, range),
     }))
@@ -699,6 +898,7 @@ fn parse_cmd_partially_sorted_args(s: &mut Stream) -> ModalResult<Statement> {
     let (cols, range) = preceded(arg::ws, arg::arg_rest_literal)
         .with_span()
         .parse_next(s)?;
+
     Ok(Statement::PartiallySortedResult(PartiallySortedResultCmd {
         span: range_to_span(s, range),
         columns: cols,
@@ -709,6 +909,7 @@ fn parse_cmd_replace_num_round_args(s: &mut Stream) -> ModalResult<Statement> {
     let (dec, range) = preceded(arg::ws, arg::arg_rest_literal)
         .with_span()
         .parse_next(s)?;
+
     Ok(Statement::ReplaceNumericRound(ReplaceNumericRoundCmd {
         span: range_to_span(s, range),
         decimals: dec,
@@ -723,6 +924,7 @@ fn parse_cmd_result_format_args(s: &mut Stream) -> ModalResult<Statement> {
     let (ver, range) = preceded(arg::ws, arg::arg_rest_literal)
         .with_span()
         .parse_next(s)?;
+
     Ok(Statement::ResultFormat(ResultFormatCmd {
         span: range_to_span(s, range),
         version: ver,
@@ -731,6 +933,7 @@ fn parse_cmd_result_format_args(s: &mut Stream) -> ModalResult<Statement> {
 
 fn parse_cmd_query_attributes_args(s: &mut Stream) -> ModalResult<Statement> {
     let (attr, range) = preceded(arg::ws, arg::arg_rest).with_span().parse_next(s)?;
+
     Ok(Statement::QueryAttributes(QueryAttributesCmd {
         span: range_to_span(s, range),
         attributes: attr,
@@ -741,6 +944,7 @@ fn parse_cmd_skip_if_hypergraph_args(s: &mut Stream) -> ModalResult<Statement> {
     let (msg, range) = preceded(arg::ws, arg::arg_rest_opt)
         .with_span()
         .parse_next(s)?;
+
     Ok(Statement::SkipIfHypergraph(SkipIfHypergraphCmd {
         span: range_to_span(s, range),
         message: msg,
@@ -760,6 +964,7 @@ fn parse_cmd_sync_with_master_args(s: &mut Stream) -> ModalResult<Statement> {
     })
     .with_span()
     .parse_next(s)?;
+
     Ok(Statement::SyncWithMaster(SyncWithMasterCmd {
         span: range_to_span(s, range),
         offset,
@@ -768,6 +973,7 @@ fn parse_cmd_sync_with_master_args(s: &mut Stream) -> ModalResult<Statement> {
 
 fn parse_cmd_evalp_args(s: &mut Stream) -> ModalResult<Statement> {
     let (sql, range) = preceded(arg::ws, arg::arg_rest).with_span().parse_next(s)?;
+
     Ok(Statement::EvalP(EvalPCmd {
         span: range_to_span(s, range),
         sql,
@@ -793,6 +999,7 @@ fn parse_cmd_delimiter_args(s: &mut Stream) -> ModalResult<Statement> {
     })
     .with_span()
     .parse_next(s)?;
+
     Ok(Statement::Delimiter(DelimiterCmd {
         span: range_to_span(s, range),
         new_delimiter: new_delim,
@@ -804,125 +1011,170 @@ fn parse_cmd_delimiter_args(s: &mut Stream) -> ModalResult<Statement> {
 // ---------------------------------------------------------------------------
 
 fn parse_cmd_remove_file_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (tokens, range) = preceded(arg::ws, arg::arg_ws_tokens).with_span().parse_next(s)?;
+    let base = s.state.base_offset;
+    let tokens = arg::arg_ws_tokens_with_ranges(s)?;
+    let range = tokens_overall_range(&tokens);
+
     Ok(Statement::RemoveFile(RemoveFileCmd {
         span: range_to_span(s, range),
-        file: strip_quotes(tokens.first().unwrap_or(&"")).into(),
-        timeout: tokens.get(1).map(|t| t.to_string()),
+        file: tokens
+            .first()
+            .map(|(t, r)| itext_from_token(t, r, base))
+            .unwrap_or_else(|| "".into()),
+        timeout: tokens.get(1).map(|(t, _)| t.to_string()),
     }))
 }
 
 fn parse_cmd_remove_files_wildcard_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (tokens, range) = preceded(arg::ws, arg::arg_ws_tokens).with_span().parse_next(s)?;
+    let base = s.state.base_offset;
+    let tokens = arg::arg_ws_tokens_with_ranges(s)?;
+    let range = tokens_overall_range(&tokens);
+
     Ok(Statement::RemoveFilesWildcard(RemoveFilesWildcardCmd {
         span: range_to_span(s, range),
-        dir: strip_quotes(tokens.first().unwrap_or(&"")).into(),
-        pattern: tokens.get(1).copied().unwrap_or("").into(),
-        timeout: tokens.get(2).map(|t| t.to_string()),
+        dir: tokens
+            .first()
+            .map(|(t, r)| itext_from_token(t, r, base))
+            .unwrap_or_else(|| "".into()),
+        pattern: tokens
+            .get(1)
+            .map(|(t, r)| itext_from_token(t, r, base))
+            .unwrap_or_else(|| "".into()),
+        timeout: tokens.get(2).map(|(t, _)| t.to_string()),
     }))
 }
 
 fn parse_cmd_copy_file_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (tokens, range) = preceded(arg::ws, arg::arg_ws_tokens).with_span().parse_next(s)?;
+    let base = s.state.base_offset;
+    let tokens = arg::arg_ws_tokens_with_ranges(s)?;
+    let range = tokens_overall_range(&tokens);
+
     Ok(Statement::CopyFile(CopyFileCmd {
         span: range_to_span(s, range),
-        source: strip_quotes(tokens.first().unwrap_or(&"")).into(),
-        dest: strip_quotes(tokens.get(1).unwrap_or(&"")).into(),
-        retry: tokens.get(2).map(|t| t.to_string()),
+        source: tokens
+            .first()
+            .map(|(t, r)| itext_from_token(t, r, base))
+            .unwrap_or_else(|| "".into()),
+        dest: tokens
+            .get(1)
+            .map(|(t, r)| itext_from_token(t, r, base))
+            .unwrap_or_else(|| "".into()),
+        retry: tokens.get(2).map(|(t, _)| t.to_string()),
     }))
 }
 
 fn parse_cmd_move_file_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (tokens, range) = preceded(arg::ws, arg::arg_ws_tokens).with_span().parse_next(s)?;
+    let base = s.state.base_offset;
+    let tokens = arg::arg_ws_tokens_with_ranges(s)?;
+    let range = tokens_overall_range(&tokens);
+
     Ok(Statement::MoveFile(MoveFileCmd {
         span: range_to_span(s, range),
-        source: strip_quotes(tokens.first().unwrap_or(&"")).into(),
-        dest: strip_quotes(tokens.get(1).unwrap_or(&"")).into(),
-        timeout: tokens.get(2).map(|t| t.to_string()),
+        source: tokens
+            .first()
+            .map(|(t, r)| itext_from_token(t, r, base))
+            .unwrap_or_else(|| "".into()),
+        dest: tokens
+            .get(1)
+            .map(|(t, r)| itext_from_token(t, r, base))
+            .unwrap_or_else(|| "".into()),
+        timeout: tokens.get(2).map(|(t, _)| t.to_string()),
     }))
 }
 
 fn parse_cmd_mkdir_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (dir, range) = (|s: &mut Stream| -> ModalResult<String> {
-        let _ = arg::ws(s)?;
-        Ok(arg::arg_token(s).unwrap_or("").to_string())
-    })
-    .with_span()
-    .parse_next(s)?;
+    use winnow::stream::Location;
+    let _ = arg::ws(s)?;
+    let token_start = s.input.current_token_start();
+    let dir = arg::arg_token(s).unwrap_or("");
+    let token_end = s.input.previous_token_end();
     Ok(Statement::Mkdir(MkdirCmd {
-        span: range_to_span(s, range),
-        dir: dir.into(),
+        span: range_to_span(s, token_start..token_end),
+        dir: InterpolatedText::parse_with_offset(dir, token_start + s.state.base_offset),
     }))
 }
 
 fn parse_cmd_rmdir_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (dir, range) = (|s: &mut Stream| -> ModalResult<String> {
-        let _ = arg::ws(s)?;
-        Ok(arg::arg_token(s).unwrap_or("").to_string())
-    })
-    .with_span()
-    .parse_next(s)?;
+    use winnow::stream::Location;
+    let _ = arg::ws(s)?;
+    let token_start = s.input.current_token_start();
+    let dir = arg::arg_token(s).unwrap_or("");
+    let token_end = s.input.previous_token_end();
     Ok(Statement::Rmdir(RmdirCmd {
-        span: range_to_span(s, range),
-        dir: dir.into(),
+        span: range_to_span(s, token_start..token_end),
+        dir: InterpolatedText::parse_with_offset(dir, token_start + s.state.base_offset),
     }))
 }
 
 fn parse_cmd_chmod_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (tokens, range) = preceded(arg::ws, arg::arg_ws_tokens).with_span().parse_next(s)?;
+    let base = s.state.base_offset;
+    let tokens = arg::arg_ws_tokens_with_ranges(s)?;
+    let range = tokens_overall_range(&tokens);
+
     Ok(Statement::Chmod(ChmodCmd {
         span: range_to_span(s, range),
-        mode: tokens.first().copied().unwrap_or("").to_string(),
-        file: strip_quotes(tokens.get(1).unwrap_or(&"")).into(),
+        mode: tokens.first().map(|(t, _)| t.to_string()).unwrap_or_default(),
+        file: tokens
+            .get(1)
+            .map(|(t, r)| itext_from_token(t, r, base))
+            .unwrap_or_else(|| "".into()),
     }))
 }
 
 fn parse_cmd_diff_files_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (tokens, range) = preceded(arg::ws, arg::arg_ws_tokens).with_span().parse_next(s)?;
+    let base = s.state.base_offset;
+    let tokens = arg::arg_ws_tokens_with_ranges(s)?;
+    let range = tokens_overall_range(&tokens);
+
     Ok(Statement::DiffFiles(DiffFilesCmd {
         span: range_to_span(s, range),
-        file1: strip_quotes(tokens.first().unwrap_or(&"")).into(),
-        file2: strip_quotes(tokens.get(1).unwrap_or(&"")).into(),
+        file1: tokens
+            .first()
+            .map(|(t, r)| itext_from_token(t, r, base))
+            .unwrap_or_else(|| "".into()),
+        file2: tokens
+            .get(1)
+            .map(|(t, r)| itext_from_token(t, r, base))
+            .unwrap_or_else(|| "".into()),
     }))
 }
 
 fn parse_cmd_file_exists_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (file, range) = (|s: &mut Stream| -> ModalResult<String> {
-        let _ = arg::ws(s)?;
-        Ok(arg::arg_token(s).unwrap_or("").to_string())
-    })
-    .with_span()
-    .parse_next(s)?;
+    use winnow::stream::Location;
+    let _ = arg::ws(s)?;
+    let token_start = s.input.current_token_start();
+    let file = arg::arg_token(s).unwrap_or("");
+    let token_end = s.input.previous_token_end();
     Ok(Statement::FileExists(FileExistsCmd {
-        span: range_to_span(s, range),
-        file: file.into(),
+        span: range_to_span(s, token_start..token_end),
+        file: InterpolatedText::parse_with_offset(file, token_start + s.state.base_offset),
     }))
 }
 
 fn parse_cmd_cat_file_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (file, range) = (|s: &mut Stream| -> ModalResult<String> {
-        let _ = arg::ws(s)?;
-        Ok(arg::arg_token(s).unwrap_or("").to_string())
-    })
-    .with_span()
-    .parse_next(s)?;
+    use winnow::stream::Location;
+    let _ = arg::ws(s)?;
+    let token_start = s.input.current_token_start();
+    let file = arg::arg_token(s).unwrap_or("");
+    let token_end = s.input.previous_token_end();
     Ok(Statement::CatFile(CatFileCmd {
-        span: range_to_span(s, range),
-        file: file.into(),
+        span: range_to_span(s, token_start..token_end),
+        file: InterpolatedText::parse_with_offset(file, token_start + s.state.base_offset),
     }))
 }
 
 fn parse_cmd_list_files_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (tokens, range) = preceded(arg::ws, arg::arg_ws_tokens).with_span().parse_next(s)?;
+    let base = s.state.base_offset;
+    let tokens = arg::arg_ws_tokens_with_ranges(s)?;
+    let range = tokens_overall_range(&tokens);
     let dir = tokens
         .first()
-        .filter(|t| !t.is_empty())
-        .map(|t| strip_quotes(t).into());
+        .filter(|(t, _)| !t.is_empty())
+        .map(|(t, r)| itext_from_token(t, r, base));
     let pattern = tokens
         .get(1)
-        .filter(|t| !t.is_empty())
-        .copied()
-        .map(|t| t.into());
+        .filter(|(t, _)| !t.is_empty())
+        .map(|(t, r)| itext_from_token(t, r, base));
     Ok(Statement::ListFiles(ListFilesCmd {
         span: range_to_span(s, range),
         dir,
@@ -931,55 +1183,77 @@ fn parse_cmd_list_files_args(s: &mut Stream) -> ModalResult<Statement> {
 }
 
 fn parse_cmd_copy_files_wildcard_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (tokens, range) = preceded(arg::ws, arg::arg_ws_tokens).with_span().parse_next(s)?;
+    let base = s.state.base_offset;
+    let tokens = arg::arg_ws_tokens_with_ranges(s)?;
+    let range = tokens_overall_range(&tokens);
+
     Ok(Statement::CopyFilesWildcard(CopyFilesWildcardCmd {
         span: range_to_span(s, range),
-        source: strip_quotes(tokens.first().unwrap_or(&"")).into(),
-        dest: strip_quotes(tokens.get(1).unwrap_or(&"")).into(),
-        retry: tokens.get(2).map(|t| t.to_string()),
+        source: tokens
+            .first()
+            .map(|(t, r)| itext_from_token(t, r, base))
+            .unwrap_or_else(|| "".into()),
+        dest: tokens
+            .get(1)
+            .map(|(t, r)| itext_from_token(t, r, base))
+            .unwrap_or_else(|| "".into()),
+        retry: tokens.get(2).map(|(t, _)| t.to_string()),
     }))
 }
 
 fn parse_cmd_list_files_write_file_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (tokens, range) = preceded(arg::ws, arg::arg_ws_tokens).with_span().parse_next(s)?;
+    let base = s.state.base_offset;
+    let tokens = arg::arg_ws_tokens_with_ranges(s)?;
+    let range = tokens_overall_range(&tokens);
+
     Ok(Statement::ListFilesWriteFile(ListFilesWriteFileCmd {
         span: range_to_span(s, range),
-        file: strip_quotes(tokens.first().unwrap_or(&"")).into(),
+        file: tokens
+            .first()
+            .map(|(t, r)| itext_from_token(t, r, base))
+            .unwrap_or_else(|| "".into()),
         dir_pattern: tokens
             .get(1)
-            .map(|t| strip_quotes(t).into())
+            .map(|(t, r)| itext_from_token(t, r, base))
             .unwrap_or_else(|| "*".into()),
     }))
 }
 
 fn parse_cmd_list_files_append_file_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (tokens, range) = preceded(arg::ws, arg::arg_ws_tokens).with_span().parse_next(s)?;
+    let base = s.state.base_offset;
+    let tokens = arg::arg_ws_tokens_with_ranges(s)?;
+    let range = tokens_overall_range(&tokens);
+
     Ok(Statement::ListFilesAppendFile(ListFilesAppendFileCmd {
         span: range_to_span(s, range),
-        file: strip_quotes(tokens.first().unwrap_or(&"")).into(),
+        file: tokens
+            .first()
+            .map(|(t, r)| itext_from_token(t, r, base))
+            .unwrap_or_else(|| "".into()),
         dir_pattern: tokens
             .get(1)
-            .map(|t| strip_quotes(t).into())
+            .map(|(t, r)| itext_from_token(t, r, base))
             .unwrap_or_else(|| "*".into()),
     }))
 }
 
 fn parse_cmd_force_rmdir_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (dir, range) = (|s: &mut Stream| -> ModalResult<String> {
-        let _ = arg::ws(s)?;
-        let dir = strip_quotes(take_till(0.., ['\r', '\n']).parse_next(s)?.trim_end());
-        Ok(dir.to_string())
-    })
-    .with_span()
-    .parse_next(s)?;
+    use winnow::stream::Location;
+    let _ = arg::ws(s)?;
+    let token_start = s.input.current_token_start();
+    let dir = strip_quotes(take_till(0.., ['\r', '\n']).parse_next(s)?.trim_end());
+    let token_end = s.input.previous_token_end();
     Ok(Statement::ForceRmdir(ForceRmdirCmd {
-        span: range_to_span(s, range),
-        dir: dir.into(),
+        span: range_to_span(s, token_start..token_end),
+        dir: InterpolatedText::parse_with_offset(dir, token_start + s.state.base_offset),
     }))
 }
 
 fn parse_cmd_force_cpdir_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (tokens, range) = preceded(arg::ws, arg::arg_ws_tokens).with_span().parse_next(s)?;
+    let (tokens, range) = preceded(arg::ws, arg::arg_ws_tokens)
+        .with_span()
+        .parse_next(s)?;
+
     Ok(Statement::ForceCpdir(ForceCpdirCmd {
         span: range_to_span(s, range),
         source: strip_quotes(tokens.first().unwrap_or(&"")).into(),
@@ -988,7 +1262,10 @@ fn parse_cmd_force_cpdir_args(s: &mut Stream) -> ModalResult<Statement> {
 }
 
 fn parse_cmd_write_line_args(s: &mut Stream) -> ModalResult<Statement> {
-    let (tokens, range) = preceded(arg::ws, arg::arg_ws_tokens).with_span().parse_next(s)?;
+    let (tokens, range) = preceded(arg::ws, arg::arg_ws_tokens)
+        .with_span()
+        .parse_next(s)?;
+
     Ok(Statement::WriteLine(WriteLineCmd {
         span: range_to_span(s, range),
         text: tokens.first().copied().unwrap_or("").into(),
@@ -1007,6 +1284,7 @@ fn parse_cmd_end_args(s: &mut Stream) -> ModalResult<Statement> {
     let (_, range) = (|_s: &mut Stream| -> ModalResult<()> { Ok(()) })
         .with_span()
         .parse_next(s)?;
+
     Ok(Statement::End(EndCmd {
         span: range_to_span(s, range),
     }))
@@ -1024,6 +1302,7 @@ fn parse_cmd_assert_args(s: &mut Stream) -> ModalResult<Statement> {
     })
     .with_span()
     .parse_next(s)?;
+
     Ok(Statement::Sql(SqlStatement {
         span: range_to_span(s, range),
         sql: sql.into(),
@@ -1034,6 +1313,7 @@ fn parse_cmd_character_set_args(s: &mut Stream) -> ModalResult<Statement> {
     let (cs, range) = preceded(arg::ws, arg::arg_rest_literal)
         .with_span()
         .parse_next(s)?;
+
     Ok(Statement::CharacterSet(CharacterSetCmd {
         span: range_to_span(s, range),
         charset: cs,
@@ -1047,6 +1327,7 @@ fn parse_cmd_system_args(s: &mut Stream) -> ModalResult<Statement> {
         ));
     }
     let (cmd, range) = preceded(arg::ws, arg::arg_rest).with_span().parse_next(s)?;
+
     Ok(Statement::System(SystemCmd {
         span: range_to_span(s, range),
         command: cmd,
@@ -1062,6 +1343,7 @@ fn parse_cmd_real_sleep_args(s: &mut Stream) -> ModalResult<Statement> {
     let (sec, range) = preceded(arg::ws, arg::arg_rest_literal)
         .with_span()
         .parse_next(s)?;
+
     Ok(Statement::RealSleep(RealSleepCmd {
         span: range_to_span(s, range),
         seconds: sec,
@@ -1075,6 +1357,7 @@ fn parse_cmd_require_args(s: &mut Stream) -> ModalResult<Statement> {
         ));
     }
     let (file, range) = preceded(arg::ws, arg::arg_rest).with_span().parse_next(s)?;
+
     Ok(Statement::Require(RequireCmd {
         span: range_to_span(s, range),
         file,
@@ -1308,6 +1591,25 @@ pub(crate) fn strip_quotes(s: &str) -> &str {
         return &s[1..pos + 1];
     }
     s
+}
+
+/// Like [`strip_quotes`] but also returns the byte offset of the stripped
+/// content within the input token. This offset is added to the token's stream
+/// range start to compute the absolute source offset for `InterpolatedText`
+/// span computation.
+pub(crate) fn strip_quotes_with_offset(s: &str) -> (&str, usize) {
+    let trimmed = s.trim();
+    let leading = s.len() - s.trim_start().len();
+    if trimmed.is_empty() {
+        return (trimmed, leading);
+    }
+    let first = trimmed.as_bytes()[0];
+    if (first == b'"' || first == b'\'' || first == b'`')
+        && let Some(pos) = trimmed[1..].find(char::from(first))
+    {
+        return (&trimmed[1..pos + 1], leading + 1);
+    }
+    (trimmed, leading)
 }
 
 /// Parse a possibly quote-wrapped argument (used by mod.rs for file args).

@@ -1,6 +1,8 @@
 /// Source location for error reporting and tooling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 
 pub struct Span {
     /// 1-based line number.

@@ -34,6 +34,25 @@ fn test_indented_comment() {
     );
 }
 
+#[test]
+fn test_comment_span_starts_at_hash_with_trailing_whitespace() {
+    // Bug: when a comment line has trailing whitespace, the span offset
+    // is off-by-one — it starts AFTER '#' instead of AT '#'.
+    // Trigger: trailing whitespace before the newline.
+    let input = "# comment with trailing space \n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::Comment(c) => {
+            assert_eq!(
+                input.as_bytes()[c.span.offset], b'#',
+                "span.offset {} should point at '#', got char {:?}",
+                c.span.offset, &input[c.span.offset..c.span.offset + 1]
+            );
+        }
+        other => panic!("expected Comment, got {:?}", other),
+    }
+}
+
 // --- Echo ---
 
 #[test]
@@ -1180,7 +1199,7 @@ fn test_write_file_with_content() {
     match &result[0] {
         Statement::WriteFile(c) => {
             assert_eq!(c.filename.to_raw_string(), "/tmp/test.txt");
-            assert_eq!(c.end_marker, "EOF");
+            assert_eq!(c.end_marker.name, "EOF");
             assert_eq!(c.content.to_raw_string(), "line1\nline2");
         }
         other => panic!("expected WriteFile, got {:?}", other),
@@ -1204,7 +1223,7 @@ fn test_write_file_custom_marker() {
     let result = strict_parse("--write_file /tmp/test.txt MY_EOF\ncontent\nMY_EOF\n");
     match &result[0] {
         Statement::WriteFile(c) => {
-            assert_eq!(c.end_marker, "MY_EOF");
+            assert_eq!(c.end_marker.name, "MY_EOF");
             assert_eq!(c.content.to_raw_string(), "content");
         }
         other => panic!("expected WriteFile, got {:?}", other),
@@ -1217,7 +1236,7 @@ fn test_perl_block() {
     match &result[0] {
         Statement::Perl(b) => {
             assert!(b.content.contains("print"));
-            assert_eq!(b.end_marker, "EOF");
+            assert_eq!(b.end_marker.name, "EOF");
         }
         other => panic!("expected Perl, got {:?}", other),
     }
@@ -2190,7 +2209,7 @@ fn test_bare_perl_block() {
     match &result[0] {
         Statement::Perl(b) => {
             assert!(b.content.contains("print 1"));
-            assert_eq!(b.end_marker, "EOF");
+            assert_eq!(b.end_marker.name, "EOF");
         }
         other => panic!("expected Perl, got {:?}", other),
     }
@@ -2908,6 +2927,733 @@ fn test_span_condition_expr_has_valid_span() {
         other => panic!("expected If, got {:?}", other),
     }
 }
+
+#[test]
+fn test_span_textpart_absolute_offset() {
+    // "SELECT $x" is at document offset 8 (after "--eval " = 8 bytes)
+    let input = "--eval SELECT $x\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::Eval(c) => {
+            let parts = c.sql.parts();
+            assert!(parts.len() >= 2);
+            match &parts[0] {
+                TextPart::Literal { span, text } => {
+                    assert_eq!(text, "SELECT ");
+                    assert_eq!(span.offset, 7, "Literal offset should be absolute (7), got {}", span.offset);
+                }
+                _ => panic!("expected Literal"),
+            }
+            match &parts[1] {
+                TextPart::Variable { span, name } => {
+                    assert_eq!(name, "x");
+                    assert_eq!(span.offset, 14, "Variable offset should be absolute (14), got {}", span.offset);
+                }
+                _ => panic!("expected Variable"),
+            }
+        }
+        other => panic!("expected Eval, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_span_bare_echo_part_offset_with_leading_ws() {
+    let input = "  echo Error: found in\n  sql/dd/metadata.h;\n";
+    let result = strict_parse(input);
+    assert_eq!(result.len(), 1);
+    match &result[0] {
+        Statement::Echo(c) => {
+            let parts = c.text.parts();
+            assert!(!parts.is_empty());
+            match &parts[0] {
+                TextPart::Literal { span, text: _ } => {
+                    assert_eq!(span.offset, 7, "part offset should be 7, got {}", span.offset);
+                }
+                other => panic!("expected Literal, got {:?}", other),
+            }
+        }
+        other => panic!("expected Echo, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_span_multiline_bare_echo_covers_all_lines() {
+    let input = "echo Error: found in\n  sql/dd/metadata.h;\n";
+    let result = strict_parse(input);
+    assert_eq!(result.len(), 1, "expected 1 Echo statement");
+    let span = result[0].span();
+    // Echo should cover BOTH lines, not just the first
+    let span_text = &input[span.offset..span.offset + span.len];
+    assert!(
+        span.len > 17, // first line alone is 17 bytes ("echo Error: found in")
+        "span len {} only covers first line, text={:?}",
+        span.len,
+        span_text
+    );
+    assert!(
+        span_text.contains("metadata.h"),
+        "span should include 2nd line content, got: {:?}",
+        span_text
+    );
+}
+
+#[test]
+fn test_span_textpart_absolute_offset_second_line() {
+    let input = "--echo hi\n--echo $val\n";
+    let result = strict_parse(input);
+    assert_eq!(result.len(), 2);
+    match &result[1] {
+        Statement::Echo(c) => {
+            let parts = c.text.parts();
+            match &parts[parts.len() - 1] {
+                TextPart::Variable { span, name } => {
+                    assert_eq!(name, "val");
+                    assert_eq!(span.offset, 17, "Variable offset on 2nd line should be absolute (17), got {}", span.offset);
+                }
+                _ => panic!("expected Variable as last part"),
+            }
+        }
+        other => panic!("expected Echo, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_span_write_file_filename_parts_absolute_offset() {
+    // filename "$FOO/bar" is at document offset 13 (after "--write_file " = 13 bytes)
+    let input = "--write_file $FOO/bar\nhello $name\nEOF\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::WriteFile(c) => {
+            let parts = c.filename.parts();
+            assert!(
+                parts.len() >= 2,
+                "filename should have at least 2 parts, got {:?}",
+                parts
+            );
+            match &parts[0] {
+                TextPart::Variable { span, name } => {
+                    assert_eq!(name, "FOO", "first filename part should be $FOO");
+                    assert_eq!(
+                        span.offset, 13,
+                        "filename Variable $FOO offset should be absolute (13), got {}",
+                        span.offset
+                    );
+                }
+                other => panic!("expected Variable as first filename part, got {:?}", other),
+            }
+            match &parts[1] {
+                TextPart::Literal { span, text } => {
+                    assert_eq!(text, "/bar", "second filename part should be /bar");
+                    assert_eq!(
+                        span.offset, 17,
+                        "filename Literal /bar offset should be absolute (17), got {}",
+                        span.offset
+                    );
+                }
+                other => panic!("expected Literal as second filename part, got {:?}", other),
+            }
+        }
+        other => panic!("expected WriteFile, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_span_write_file_content_parts_absolute_offset() {
+    // content "hello $name" starts on line 2 at document offset 22
+    // (--write_file $FOO/bar\n = 22 bytes)
+    let input = "--write_file $FOO/bar\nhello $name\nEOF\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::WriteFile(c) => {
+            let parts = c.content.parts();
+            assert!(
+                parts.len() >= 2,
+                "content should have at least 2 parts, got {:?}",
+                parts
+            );
+            match &parts[0] {
+                TextPart::Literal { span, text } => {
+                    assert_eq!(text, "hello ", "first content part should be 'hello '");
+                    assert_eq!(
+                        span.offset, 22,
+                        "content Literal 'hello ' offset should be absolute (22), got {}",
+                        span.offset
+                    );
+                }
+                other => panic!("expected Literal as first content part, got {:?}", other),
+            }
+            match &parts[1] {
+                TextPart::Variable { span, name } => {
+                    assert_eq!(name, "name", "second content part should be $name");
+                    assert_eq!(
+                        span.offset, 28,
+                        "content Variable $name offset should be absolute (28), got {}",
+                        span.offset
+                    );
+                }
+                other => panic!("expected Variable as second content part, got {:?}", other),
+            }
+        }
+        other => panic!("expected WriteFile, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_span_append_file_parts_absolute_offset() {
+    // append_file should have the same offset fix as write_file
+    // "--append_file " = 14 bytes, so $D/f starts at offset 14
+    let input = "--append_file $D/f\ndata $v\nEOF\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::AppendFile(c) => {
+            match &c.filename.parts()[0] {
+                TextPart::Variable { span, name } => {
+                    assert_eq!(name, "D");
+                    assert_eq!(
+                        span.offset, 14,
+                        "append_file filename $D offset should be 14, got {}",
+                        span.offset
+                    );
+                }
+                other => panic!("expected Variable, got {:?}", other),
+            }
+            // content "data $v" starts at offset 25 ("\n" at index 18, so 19..)
+            // "--append_file $D/f\n" = 19 bytes, content starts at 19
+            match &c.content.parts()[0] {
+                TextPart::Literal { span, text: _ } => {
+                    assert_eq!(
+                        span.offset, 19,
+                        "append_file content offset should be 19, got {}",
+                        span.offset
+                    );
+                }
+                other => panic!("expected Literal, got {:?}", other),
+            }
+        }
+        other => panic!("expected AppendFile, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_span_write_file_content_drift_across_blank_line() {
+    // Content with a blank line between two variables. The blank line's '\n'
+    // must be counted in the span offset — the second variable is at offset 27
+    // in the source, not 26 (which would be the collapsed position).
+    //
+    // Layout:
+    //   --write_file /tmp/f\n   (20 bytes, offsets 0..19, '\n' at 19)
+    //   $var1\n                  ($var1 at 20..24, '\n' at 25)
+    //   \n                        (blank line, '\n' at 26)
+    //   $var2\n                  ($var2 at 27..31, '\n' at 32)
+    //   EOF\n
+    let input = "--write_file /tmp/f\n$var1\n\n$var2\nEOF\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::WriteFile(c) => {
+            let parts = c.content.parts();
+            // Find the $var2 variable part (last part).
+            let var2 = parts
+                .iter()
+                .rev()
+                .find(|p| matches!(p, TextPart::Variable { name, .. } if name == "var2"))
+                .unwrap_or_else(|| panic!("expected $var2 variable, got {:?}", parts));
+            match var2 {
+                TextPart::Variable { span, name } => {
+                    assert_eq!(*name, "var2");
+                    assert_eq!(
+                        span.offset, 27,
+                        "$var2 offset must account for blank line (27), got {}. parts={:?}",
+                        span.offset, parts
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+        other => panic!("expected WriteFile, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_span_write_file_content_preserves_blank_line_in_text() {
+    // The blank line should be preserved in the content (not collapsed).
+    let input = "--write_file /tmp/f\nline1\n\nline3\nEOF\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::WriteFile(c) => {
+            assert_eq!(
+                c.content.to_raw_string(),
+                "line1\n\nline3",
+                "blank line within content must be preserved"
+            );
+        }
+        other => panic!("expected WriteFile, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_span_write_file_every_part_maps_to_source() {
+    // Strongest verification: every content AND filename part's span, when used
+    // to slice the source, must yield the exact expected text. Simulates a
+    // realistic write_file with variables, blank lines, and mixed content.
+    let input = "--write_file $DIR/out.sql\nSELECT $col\n\nFROM $t\nEOF\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::WriteFile(c) => {
+            // Verify filename parts map back to source exactly.
+            for (i, part) in c.filename.parts().iter().enumerate() {
+                let (span, expected) = match part {
+                    TextPart::Literal { span, text } => (span, text.as_str()),
+                    TextPart::Variable { span, name } => (span, name.as_str()),
+                };
+                let slice = &input[span.offset..span.offset + span.len];
+                let wanted = match part {
+                    TextPart::Variable { name, .. } => {
+                        &input[span.offset..span.offset + name.len() + 1]
+                    }
+                    _ => expected,
+                };
+                assert_eq!(
+                    slice, wanted,
+                    "filename part[{i}] span {span:?} does not map to source; got {:?} expected {:?}",
+                    slice, wanted
+                );
+            }
+            // Verify content parts map back to source exactly.
+            for (i, part) in c.content.parts().iter().enumerate() {
+                let (span, expected) = match part {
+                    TextPart::Literal { span, text } => (span, text.as_str()),
+                    TextPart::Variable { span, name } => (span, name.as_str()),
+                };
+                let slice = &input[span.offset..span.offset + span.len];
+                let wanted = match part {
+                    TextPart::Variable { name, .. } => {
+                        &input[span.offset..span.offset + name.len() + 1]
+                    }
+                    _ => expected,
+                };
+                assert_eq!(
+                    slice, wanted,
+                    "content part[{i}] span {span:?} does not map to source; got {:?} expected {:?}",
+                    slice, wanted
+                );
+            }
+        }
+        other => panic!("expected WriteFile, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_end_marker_open_close_spans_explicit() {
+    // "--write_file /tmp/f MY_EOF\nhi\nMY_EOF\n"
+    // open marker MY_EOF at 20..25; close marker MY_EOF at 30..35
+    let input = "--write_file /tmp/f MY_EOF\nhi\nMY_EOF\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::WriteFile(c) => {
+            assert_eq!(c.end_marker.name, "MY_EOF");
+            assert_eq!(c.end_marker.open_span.offset, 20, "open got {}", c.end_marker.open_span.offset);
+            assert_eq!(c.end_marker.open_span.len, 6);
+            assert_eq!(
+                &input[c.end_marker.open_span.offset..c.end_marker.open_span.offset + c.end_marker.open_span.len],
+                "MY_EOF"
+            );
+            assert_eq!(c.end_marker.close_span.offset, 30, "close got {}", c.end_marker.close_span.offset);
+            assert_eq!(c.end_marker.close_span.len, 6);
+            assert_eq!(
+                &input[c.end_marker.close_span.offset..c.end_marker.close_span.offset + c.end_marker.close_span.len],
+                "MY_EOF"
+            );
+        }
+        other => panic!("expected WriteFile, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_end_marker_open_span_implicit_is_zero_length() {
+    let input = "--write_file /tmp/f\nhello\nEOF\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::WriteFile(c) => {
+            assert_eq!(c.end_marker.name, "EOF");
+            assert_eq!(
+                c.end_marker.open_span.len, 0,
+                "implicit open_span should be zero-length, got {:?}", c.end_marker.open_span
+            );
+            assert_eq!(c.end_marker.close_span.len, 3);
+            assert_eq!(
+                &input[c.end_marker.close_span.offset..c.end_marker.close_span.offset + 3],
+                "EOF"
+            );
+        }
+        other => panic!("expected WriteFile, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_end_marker_spans_perl_block() {
+    // "--perl EOF\ncode\nEOF\n" — explicit marker on both lines
+    let input = "--perl EOF\ncode\nEOF\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::Perl(b) => {
+            assert_eq!(b.end_marker.name, "EOF");
+            assert_eq!(b.end_marker.open_span.offset, 7, "open got {}", b.end_marker.open_span.offset);
+            assert_eq!(b.end_marker.open_span.len, 3);
+            assert_eq!(b.end_marker.close_span.offset, 16, "close got {}", b.end_marker.close_span.offset);
+            assert_eq!(b.end_marker.close_span.len, 3);
+        }
+        other => panic!("expected Perl, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_if_block_brace_spans_inline() {
+    // Path 1: inline block if ($x) { --echo hi }
+    // { at offset 8, } at offset 20
+    let input = "if ($x) { --echo hi }\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::If(c) => {
+            assert_eq!(
+                &input[c.open_brace_span.offset..c.open_brace_span.offset + c.open_brace_span.len],
+                "{",
+                "open brace span should point at {{"
+            );
+            assert_eq!(c.open_brace_span.offset, 8, "open got {}", c.open_brace_span.offset);
+            assert_eq!(c.open_brace_span.len, 1);
+            assert_eq!(
+                &input[c.close_brace_span.offset..c.close_brace_span.offset + c.close_brace_span.len],
+                "}",
+                "close brace span should point at }}"
+            );
+            assert_eq!(c.close_brace_span.offset, 20, "close got {}", c.close_brace_span.offset);
+            assert_eq!(c.close_brace_span.len, 1);
+        }
+        other => panic!("expected If, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_while_block_brace_spans_same_line_open() {
+    // Path 2: { on condition line, } on a later line
+    // if ($x) {\n--echo hi\n}\n  → { at 8, } at 20
+    let input = "while ($x) {\n--echo hi\n}\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::While(c) => {
+            assert_eq!(
+                &input[c.open_brace_span.offset..c.open_brace_span.offset + c.open_brace_span.len],
+                "{"
+            );
+            assert_eq!(c.open_brace_span.offset, 11, "open got {}", c.open_brace_span.offset);
+            // "while ($x) {\n" = 13 bytes, "--echo hi\n" = 10, "}" at 23
+            assert_eq!(
+                &input[c.close_brace_span.offset..c.close_brace_span.offset + c.close_brace_span.len],
+                "}"
+            );
+            assert_eq!(c.close_brace_span.offset, 23, "close got {}", c.close_brace_span.offset);
+        }
+        other => panic!("expected While, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_if_block_brace_spans_multi_line_condition() {
+    // Path 3: { on a subsequent line
+    // if ($x)\n{\n--echo hi\n}\n  → { at 9, } at 21
+    let input = "if ($x)\n{\n--echo hi\n}\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::If(c) => {
+            assert_eq!(
+                &input[c.open_brace_span.offset..c.open_brace_span.offset + c.open_brace_span.len],
+                "{"
+            );
+            assert_eq!(c.open_brace_span.offset, 8, "open got {}", c.open_brace_span.offset);
+            assert_eq!(
+                &input[c.close_brace_span.offset..c.close_brace_span.offset + c.close_brace_span.len],
+                "}"
+            );
+            assert_eq!(c.close_brace_span.offset, 20, "close got {}", c.close_brace_span.offset);
+        }
+        other => panic!("expected If, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_if_block_brace_spans_dash_prefix_close() {
+    // Special form: `-- if ($a) {` / `-- }` — both lines have `--` prefix.
+    // { at offset 11; } (inside `-- }`) at offset 16.
+    let input = "-- if ($a) {\n-- }\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::If(c) => {
+            assert_eq!(c.body.len(), 0, "expected empty body, got {:?}", c.body);
+            assert_eq!(
+                &input[c.open_brace_span.offset..c.open_brace_span.offset + c.open_brace_span.len],
+                "{"
+            );
+            assert_eq!(c.open_brace_span.offset, 11, "open got {}", c.open_brace_span.offset);
+            assert_eq!(c.open_brace_span.len, 1);
+            assert_eq!(
+                &input[c.close_brace_span.offset..c.close_brace_span.offset + c.close_brace_span.len],
+                "}"
+            );
+            assert_eq!(c.close_brace_span.offset, 16, "close got {}", c.close_brace_span.offset);
+            assert_eq!(c.close_brace_span.len, 1);
+        }
+        other => panic!("expected If, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_span_remove_file_parts_absolute_offset() {
+    // "--remove_file" = 13 bytes (indices 0..12), space at 13, $DIR at 14
+    let input = "--remove_file $DIR/f\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::RemoveFile(c) => {
+            let parts = c.file.parts();
+            assert!(parts.len() >= 2, "got {:?}", parts);
+            match &parts[0] {
+                TextPart::Variable { span, name } => {
+                    assert_eq!(name, "DIR");
+                    assert_eq!(span.offset, 14, "got {}", span.offset);
+                }
+                other => panic!("expected Variable, got {:?}", other),
+            }
+            match &parts[1] {
+                TextPart::Literal { span, text } => {
+                    assert_eq!(text, "/f");
+                    assert_eq!(span.offset, 18, "got {}", span.offset);
+                }
+                other => panic!("expected Literal, got {:?}", other),
+            }
+        }
+        other => panic!("expected RemoveFile, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_span_copy_file_parts_absolute_offset() {
+    // "--copy_file " = 12 bytes, $src at 12; " " at 16; $dst at 17
+    let input = "--copy_file $src $dst\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::CopyFile(c) => {
+            match &c.source.parts()[0] {
+                TextPart::Variable { span, name } => {
+                    assert_eq!(name, "src");
+                    assert_eq!(span.offset, 12, "source got {}", span.offset);
+                }
+                other => panic!("expected Variable, got {:?}", other),
+            }
+            match &c.dest.parts()[0] {
+                TextPart::Variable { span, name } => {
+                    assert_eq!(name, "dst");
+                    assert_eq!(span.offset, 17, "dest got {}", span.offset);
+                }
+                other => panic!("expected Variable, got {:?}", other),
+            }
+        }
+        other => panic!("expected CopyFile, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_span_chmod_file_parts_absolute_offset() {
+    // "--chmod 644 " = 12 bytes, $f at offset 12
+    let input = "--chmod 644 $f\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::Chmod(c) => {
+            match &c.file.parts()[0] {
+                TextPart::Variable { span, name } => {
+                    assert_eq!(name, "f");
+                    assert_eq!(span.offset, 12, "got {}", span.offset);
+                }
+                other => panic!("expected Variable, got {:?}", other),
+            }
+        }
+        other => panic!("expected Chmod, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_span_diff_files_parts_absolute_offset() {
+    // "--diff_files " = 13 bytes, $a at 13; " " at 15; $b at 16
+    let input = "--diff_files $a $b\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::DiffFiles(c) => {
+            match &c.file1.parts()[0] {
+                TextPart::Variable { span, name } => {
+                    assert_eq!(name, "a");
+                    assert_eq!(span.offset, 13, "file1 got {}", span.offset);
+                }
+                other => panic!("expected Variable, got {:?}", other),
+            }
+            match &c.file2.parts()[0] {
+                TextPart::Variable { span, name } => {
+                    assert_eq!(name, "b");
+                    assert_eq!(span.offset, 16, "file2 got {}", span.offset);
+                }
+                other => panic!("expected Variable, got {:?}", other),
+            }
+        }
+        other => panic!("expected DiffFiles, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_span_remove_files_wildcard_parts_absolute_offset() {
+    // "--remove_files_wildcard" = 23 bytes (indices 0..22), space at 23, $dir at 24
+    let input = "--remove_files_wildcard $dir *.tmp\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::RemoveFilesWildcard(c) => {
+            match &c.dir.parts()[0] {
+                TextPart::Variable { span, name } => {
+                    assert_eq!(name, "dir");
+                    assert_eq!(span.offset, 24, "dir got {}", span.offset);
+                }
+                other => panic!("expected Variable, got {:?}", other),
+            }
+        }
+        other => panic!("expected RemoveFilesWildcard, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_span_letvalue_query_not_dummy() {
+    let input = "--let $x = `SELECT 1`\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::Let(c) => match &c.value {
+            LetValue::Query(q) => {
+                assert!(q.span.line > 0 || q.span.offset > 0, "QueryExpr span should not be dummy, got {:?}", q.span);
+            }
+            other => panic!("expected Query, got {:?}", other),
+        },
+        other => panic!("expected Let, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_let_multiline_literal_value_span() {
+    // Multi-line let value (bare command, terminated by ;).
+    // The Literal span must cover ALL lines, not just the first.
+    let input = "let $x = \"[SELECT COUNT(i_s_version)\n                       FROM I_S_published_schema i\n                       WHERE i.checksum = w.checksum]\" >= 1;\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::Let(c) => match &c.value {
+            LetValue::Literal { value, span } => {
+                // Value should contain all 3 lines.
+                assert!(
+                    value.contains("FROM I_S_published_schema"),
+                    "value should include 2nd line, got: {:?}",
+                    value
+                );
+                assert!(
+                    value.contains("WHERE i.checksum"),
+                    "value should include 3rd line, got: {:?}",
+                    value
+                );
+                // Span should cover multi-line content.
+                assert!(
+                    span.len > 80,
+                    "span len {} too short — should cover multi-line value",
+                    span.len
+                );
+            }
+            other => panic!("expected Literal, got {:?}", other),
+        },
+        other => panic!("expected Let, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_let_query_get_value_basic() {
+    let input = "let $v = query_get_value(SELECT 1, col, 0);\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::Let(c) => match &c.value {
+            LetValue::QueryGetValue(call) => {
+                assert_eq!(call.arguments.len(), 3, "expected 3 args");
+                assert_eq!(call.commas.len(), 2, "expected 2 commas");
+                // Verify each span maps to correct source text.
+                assert_eq!(&input[call.function_name_span.offset..call.function_name_span.offset + call.function_name_span.len], "query_get_value");
+                assert_eq!(&input[call.open_paren_span.offset..call.open_paren_span.offset + call.open_paren_span.len], "(");
+                assert_eq!(&input[call.close_paren_span.offset..call.close_paren_span.offset + call.close_paren_span.len], ")");
+                // Args
+                assert_eq!(call.arguments[0].value.to_raw_string(), "SELECT 1");
+                assert_eq!(&input[call.arguments[0].span.offset..call.arguments[0].span.offset + call.arguments[0].span.len], "SELECT 1");
+                assert_eq!(call.arguments[1].value.to_raw_string(), "col");
+                assert_eq!(&input[call.arguments[1].span.offset..call.arguments[1].span.offset + call.arguments[1].span.len], "col");
+                assert_eq!(call.arguments[2].value.to_raw_string(), "0");
+                assert_eq!(&input[call.arguments[2].span.offset..call.arguments[2].span.offset + call.arguments[2].span.len], "0");
+                // Commas
+                assert_eq!(&input[call.commas[0].offset..call.commas[0].offset + call.commas[0].len], ",");
+                assert_eq!(&input[call.commas[1].offset..call.commas[1].offset + call.commas[1].len], ",");
+            }
+            other => panic!("expected QueryGetValue, got {:?}", other),
+        },
+        other => panic!("expected Let, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_let_query_get_value_quoted_arg_with_comma() {
+    // Quote-aware: comma inside single quotes must NOT split args.
+    let input = "let $v = query_get_value('SELECT a, b', \"b\", 1);\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::Let(c) => match &c.value {
+            LetValue::QueryGetValue(call) => {
+                assert_eq!(call.arguments.len(), 3, "quoted comma should not split");
+                assert_eq!(call.arguments[0].value.to_raw_string(), "SELECT a, b");
+                assert_eq!(call.arguments[1].value.to_raw_string(), "b");
+                assert_eq!(call.arguments[2].value.to_raw_string(), "1");
+            }
+            other => panic!("expected QueryGetValue, got {:?}", other),
+        },
+        other => panic!("expected Let, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_let_query_get_value_variable_args() {
+    let input = "let $v = query_get_value($sql, $col, $row);\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::Let(c) => match &c.value {
+            LetValue::QueryGetValue(call) => {
+                // Each arg should be a Variable part in InterpolatedText.
+                assert_eq!(call.arguments[0].value.variable_names(), vec!["sql"]);
+                assert_eq!(call.arguments[1].value.variable_names(), vec!["col"]);
+                assert_eq!(call.arguments[2].value.variable_names(), vec!["row"]);
+            }
+            other => panic!("expected QueryGetValue, got {:?}", other),
+        },
+        other => panic!("expected Let, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_let_non_query_get_value_stays_literal() {
+    let input = "let $v = hello;\n";
+    let result = strict_parse(input);
+    match &result[0] {
+        Statement::Let(c) => match &c.value {
+            LetValue::Literal { value, .. } => {
+                assert_eq!(value, "hello");
+            }
+            other => panic!("expected Literal, got {:?}", other),
+        },
+        other => panic!("expected Let, got {:?}", other),
+    }
+}
+
 span_test!(
     test_span_error,
     "--error ER_PARSE_ERROR\n",
@@ -3786,7 +4532,7 @@ fn test_bare_write_file_with_delimiter() {
     match &result[0] {
         Statement::WriteFile(c) => {
             assert_eq!(c.filename.to_raw_string(), "/tmp/test.txt");
-            assert_eq!(c.end_marker, "EOF");
+            assert_eq!(c.end_marker.name, "EOF");
             assert!(c.content.to_raw_string().contains("content"));
         }
         other => panic!("expected WriteFile, got {:?}", other),

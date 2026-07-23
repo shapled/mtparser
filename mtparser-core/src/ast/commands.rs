@@ -26,6 +26,8 @@ use crate::ast::text::InterpolatedText;
 /// `--echo text` or `echo text;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct EchoCmd {
     pub span: Span,
     pub text: InterpolatedText,
@@ -34,6 +36,8 @@ pub struct EchoCmd {
 /// `--let $var=value` or `let $var=value;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct LetCmd {
     pub span: Span,
     pub variable: String,
@@ -43,14 +47,52 @@ pub struct LetCmd {
 /// Value in a let assignment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub enum LetValue {
     Literal { value: String, span: Span },
     Query(QueryExpr),
+    QueryGetValue(QueryGetValueCall),
+}
+
+/// A single argument to `query_get_value(...)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct QueryGetValueArg {
+    /// Span of the argument text (trimmed, including surrounding quotes if present).
+    pub span: Span,
+    /// Argument value (quotes stripped), with per-part spans for `$var` interpolation.
+    pub value: InterpolatedText,
+}
+
+/// `query_get_value(query, column_name, row_number [, resultset_number])` function call
+/// in a `let` assignment. Carries spans for every syntactic element.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct QueryGetValueCall {
+    /// Overall span: from `query_get_value` to closing `)`.
+    pub span: Span,
+    /// Span of the function name `query_get_value`.
+    pub function_name_span: Span,
+    /// Span of the opening `(`.
+    pub open_paren_span: Span,
+    /// Span of the closing `)`.
+    pub close_paren_span: Span,
+    /// Arguments (3 required, 1 optional resultset number).
+    pub arguments: Vec<QueryGetValueArg>,
+    /// Spans of commas between arguments (`len = arguments.len() - 1`).
+    pub commas: Vec<Span>,
 }
 
 /// `--error ER_CODE` or `error ER_CODE;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ErrorCmd {
     pub span: Span,
     pub error_codes: Vec<InterpolatedText>,
@@ -59,6 +101,8 @@ pub struct ErrorCmd {
 /// `--source file` or `source file;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SourceCmd {
     pub span: Span,
     pub file: InterpolatedText,
@@ -67,6 +111,8 @@ pub struct SourceCmd {
 /// `--skip [message]` or `skip [message];`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SkipCmd {
     pub span: Span,
     pub message: Option<String>,
@@ -75,6 +121,8 @@ pub struct SkipCmd {
 /// `--die message` or `die message;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct DieCmd {
     pub span: Span,
     pub message: Option<String>,
@@ -83,6 +131,8 @@ pub struct DieCmd {
 /// `--exit` or `exit;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 
 pub struct ExitCmd {
     pub span: Span,
@@ -91,6 +141,8 @@ pub struct ExitCmd {
 /// `--exec command` or `exec command;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ExecCmd {
     pub span: Span,
     pub command: InterpolatedText,
@@ -99,6 +151,8 @@ pub struct ExecCmd {
 /// `--execw command` (wide character exec)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ExecwCmd {
     pub span: Span,
     pub command: InterpolatedText,
@@ -107,6 +161,8 @@ pub struct ExecwCmd {
 /// `--exec_in_background command`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ExecInBackgroundCmd {
     pub span: Span,
     pub command: InterpolatedText,
@@ -115,6 +171,8 @@ pub struct ExecInBackgroundCmd {
 /// `--sleep N` or `sleep N;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SleepCmd {
     pub span: Span,
     pub seconds: String,
@@ -123,6 +181,8 @@ pub struct SleepCmd {
 /// `--inc $var` or `inc $var;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct IncCmd {
     pub span: Span,
     pub variable: String,
@@ -131,6 +191,8 @@ pub struct IncCmd {
 /// `--dec $var` or `dec $var;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct DecCmd {
     pub span: Span,
     pub variable: String,
@@ -139,6 +201,8 @@ pub struct DecCmd {
 /// `--assert expr` (8.0+)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct AssertCmd {
     pub span: Span,
     pub expression: Expr,
@@ -147,6 +211,8 @@ pub struct AssertCmd {
 /// `--connect(name, host, user, pass, db, port, socket, ...)`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ConnectCmd {
     pub span: Span,
     pub name: Option<InterpolatedText>,
@@ -156,6 +222,8 @@ pub struct ConnectCmd {
 /// Connection parameters for connect command.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ConnectParams {
     pub host: Option<InterpolatedText>,
     pub user: Option<InterpolatedText>,
@@ -169,6 +237,8 @@ pub struct ConnectParams {
 /// `--connection name` or `connection name;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ConnectionCmd {
     pub span: Span,
     pub name: InterpolatedText,
@@ -177,6 +247,8 @@ pub struct ConnectionCmd {
 /// `--disconnect name` or `disconnect name;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct DisconnectCmd {
     pub span: Span,
     pub name: InterpolatedText,
@@ -185,6 +257,8 @@ pub struct DisconnectCmd {
 /// `--change_user [user, pass, db]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ChangeUserCmd {
     pub span: Span,
     pub user: Option<InterpolatedText>,
@@ -195,6 +269,8 @@ pub struct ChangeUserCmd {
 /// `--reset_connection` or `reset_connection;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ResetConnectionCmd {
     pub span: Span,
 }
@@ -202,6 +278,8 @@ pub struct ResetConnectionCmd {
 /// `query SQL;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct QueryCmd {
     pub span: Span,
     pub sql: InterpolatedText,
@@ -210,6 +288,8 @@ pub struct QueryCmd {
 /// `eval SQL;` (variable substitution before execution)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct EvalCmd {
     pub span: Span,
     pub sql: InterpolatedText,
@@ -218,6 +298,8 @@ pub struct EvalCmd {
 /// `send SQL;` (send without reaping result)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SendCmd {
     pub span: Span,
     pub sql: InterpolatedText,
@@ -226,6 +308,8 @@ pub struct SendCmd {
 /// `send_eval SQL;` (variable substitution + send)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SendEvalCmd {
     pub span: Span,
     pub sql: InterpolatedText,
@@ -234,6 +318,8 @@ pub struct SendEvalCmd {
 /// `reap;` (reap result from send)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ReapCmd {
     pub span: Span,
 }
@@ -241,6 +327,8 @@ pub struct ReapCmd {
 /// `--horizontal_results` or `horizontal_results;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct HorizontalResultsCmd {
     pub span: Span,
 }
@@ -248,6 +336,8 @@ pub struct HorizontalResultsCmd {
 /// `--vertical_results` or `vertical_results;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct VerticalResultsCmd {
     pub span: Span,
 }
@@ -255,6 +345,8 @@ pub struct VerticalResultsCmd {
 /// `--replace_result old new [old2 new2 ...]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ReplaceResultCmd {
     pub span: Span,
     pub replacements: Vec<(InterpolatedText, InterpolatedText)>,
@@ -263,6 +355,8 @@ pub struct ReplaceResultCmd {
 /// `--replace_column col_num old new [col_num2 old2 new2 ...]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ReplaceColumnCmd {
     pub span: Span,
     pub replacements: Vec<ReplaceColumnItem>,
@@ -270,6 +364,8 @@ pub struct ReplaceColumnCmd {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ReplaceColumnItem {
     pub column: String,
     pub old_value: InterpolatedText,
@@ -279,6 +375,8 @@ pub struct ReplaceColumnItem {
 /// `--replace_regex /pattern/replacement/ [flags]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ReplaceRegexCmd {
     pub span: Span,
     pub pattern: String,
@@ -289,6 +387,8 @@ pub struct ReplaceRegexCmd {
 /// `--sorted_result` or `sorted_result;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SortedResultCmd {
     pub span: Span,
 }
@@ -296,6 +396,8 @@ pub struct SortedResultCmd {
 /// `--partially_sorted_result columns` (8.0+)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct PartiallySortedResultCmd {
     pub span: Span,
     pub columns: String,
@@ -304,6 +406,8 @@ pub struct PartiallySortedResultCmd {
 /// `--replace_numeric_round decimals`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ReplaceNumericRoundCmd {
     pub span: Span,
     pub decimals: String,
@@ -314,6 +418,8 @@ pub struct ReplaceNumericRoundCmd {
 /// Generic enable/disable command with optional ONCE modifier and error code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ToggleCmd {
     pub span: Span,
     pub kind: ToggleKind,
@@ -324,6 +430,8 @@ pub struct ToggleCmd {
 /// What is being toggled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub enum ToggleKind {
     Warnings,
     QueryLog,
@@ -352,6 +460,8 @@ pub enum ToggleKind {
 /// `--delimiter new_delimiter` or `delimiter new_delimiter;`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct DelimiterCmd {
     pub span: Span,
     pub new_delimiter: String,
@@ -359,29 +469,53 @@ pub struct DelimiterCmd {
 
 // --- File I/O ---
 
+/// An end marker for `write_file`/`append_file`/`perl` blocks, carrying spans
+/// for both occurrences: the marker that opens the content region (on the
+/// command's begin line) and the marker that closes it (the terminator line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct EndMarker {
+    /// The marker name (e.g. `"EOF"`), without surrounding whitespace.
+    pub name: String,
+    /// Span of the marker on the command's begin line (e.g. the `EOF` in
+    /// `--write_file path EOF`). Zero-length when the marker is implicit
+    /// (defaulted to `"EOF"` because the command line omitted it).
+    pub open_span: Span,
+    /// Span of the marker line that terminates the block.
+    pub close_span: Span,
+}
+
 /// `--write_file filename END_MARKER ... END_MARKER`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct WriteFileCmd {
     pub span: Span,
     pub filename: InterpolatedText,
-    pub end_marker: String,
+    pub end_marker: EndMarker,
     pub content: InterpolatedText,
 }
 
 /// `--append_file filename END_MARKER ... END_MARKER`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct AppendFileCmd {
     pub span: Span,
     pub filename: InterpolatedText,
-    pub end_marker: String,
+    pub end_marker: EndMarker,
     pub content: InterpolatedText,
 }
 
 /// `--remove_file file [timeout]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct RemoveFileCmd {
     pub span: Span,
     pub file: InterpolatedText,
@@ -391,6 +525,8 @@ pub struct RemoveFileCmd {
 /// `--remove_files_wildcard dir pattern [timeout]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct RemoveFilesWildcardCmd {
     pub span: Span,
     pub dir: InterpolatedText,
@@ -401,6 +537,8 @@ pub struct RemoveFilesWildcardCmd {
 /// `--copy_file src dest [retry]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct CopyFileCmd {
     pub span: Span,
     pub source: InterpolatedText,
@@ -411,6 +549,8 @@ pub struct CopyFileCmd {
 /// `--move_file src dest [timeout]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct MoveFileCmd {
     pub span: Span,
     pub source: InterpolatedText,
@@ -421,6 +561,8 @@ pub struct MoveFileCmd {
 /// `--mkdir dir`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct MkdirCmd {
     pub span: Span,
     pub dir: InterpolatedText,
@@ -429,6 +571,8 @@ pub struct MkdirCmd {
 /// `--rmdir dir`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct RmdirCmd {
     pub span: Span,
     pub dir: InterpolatedText,
@@ -437,6 +581,8 @@ pub struct RmdirCmd {
 /// `--chmod mode file`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ChmodCmd {
     pub span: Span,
     pub mode: String,
@@ -446,6 +592,8 @@ pub struct ChmodCmd {
 /// `--diff_files file1 file2`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct DiffFilesCmd {
     pub span: Span,
     pub file1: InterpolatedText,
@@ -455,6 +603,8 @@ pub struct DiffFilesCmd {
 /// `--file_exists file`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct FileExistsCmd {
     pub span: Span,
     pub file: InterpolatedText,
@@ -463,6 +613,8 @@ pub struct FileExistsCmd {
 /// `--cat_file file`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct CatFileCmd {
     pub span: Span,
     pub file: InterpolatedText,
@@ -471,6 +623,8 @@ pub struct CatFileCmd {
 /// `--list_files [dir] [pattern]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ListFilesCmd {
     pub span: Span,
     pub dir: Option<InterpolatedText>,
@@ -480,6 +634,8 @@ pub struct ListFilesCmd {
 /// `--output file`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct OutputCmd {
     pub span: Span,
     pub file: InterpolatedText,
@@ -490,6 +646,8 @@ pub struct OutputCmd {
 /// `--shutdown_server`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ShutdownServerCmd {
     pub span: Span,
 }
@@ -497,6 +655,8 @@ pub struct ShutdownServerCmd {
 /// `--send_quit`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SendQuitCmd {
     pub span: Span,
 }
@@ -504,6 +664,8 @@ pub struct SendQuitCmd {
 /// `--send_shutdown`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SendShutdownCmd {
     pub span: Span,
 }
@@ -511,6 +673,8 @@ pub struct SendShutdownCmd {
 /// `--expr $var = expression`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ExprCmd {
     pub span: Span,
     pub variable: String,
@@ -522,6 +686,8 @@ pub struct ExprCmd {
 /// `--character_set charset` (5.7 only)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct CharacterSetCmd {
     pub span: Span,
     pub charset: String,
@@ -530,6 +696,8 @@ pub struct CharacterSetCmd {
 /// `--system command` (5.7 only)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SystemCmd {
     pub span: Span,
     pub command: InterpolatedText,
@@ -538,6 +706,8 @@ pub struct SystemCmd {
 /// `--real_sleep seconds` (5.7 only)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct RealSleepCmd {
     pub span: Span,
     pub seconds: String,
@@ -546,6 +716,8 @@ pub struct RealSleepCmd {
 /// `--require filename` (5.7 only)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct RequireCmd {
     pub span: Span,
     pub file: InterpolatedText,
@@ -554,6 +726,8 @@ pub struct RequireCmd {
 /// `--lowercase_result` (5.7 only)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct LowercaseResultCmd {
     pub span: Span,
 }
@@ -561,6 +735,8 @@ pub struct LowercaseResultCmd {
 /// `--sync_slave_with_master` (5.7 only)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SyncSlaveWithMasterCmd {
     pub span: Span,
 }
@@ -568,6 +744,8 @@ pub struct SyncSlaveWithMasterCmd {
 /// `--copy_files_wildcard src_pattern dest [retry]` (5.7 only)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct CopyFilesWildcardCmd {
     pub span: Span,
     pub source: InterpolatedText,
@@ -580,6 +758,8 @@ pub struct CopyFilesWildcardCmd {
 /// `--query_vertical [SQL]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct QueryVerticalCmd {
     pub span: Span,
     pub sql: InterpolatedText,
@@ -588,6 +768,8 @@ pub struct QueryVerticalCmd {
 /// `--result_format N`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ResultFormatCmd {
     pub span: Span,
     pub version: String,
@@ -596,6 +778,8 @@ pub struct ResultFormatCmd {
 /// `--query_attributes name value`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct QueryAttributesCmd {
     pub span: Span,
     pub attributes: InterpolatedText,
@@ -604,6 +788,8 @@ pub struct QueryAttributesCmd {
 /// `--list_files_write_file file [dir_pattern]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ListFilesWriteFileCmd {
     pub span: Span,
     pub file: InterpolatedText,
@@ -613,6 +799,8 @@ pub struct ListFilesWriteFileCmd {
 /// `--list_files_append_file file [dir_pattern]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ListFilesAppendFileCmd {
     pub span: Span,
     pub file: InterpolatedText,
@@ -622,6 +810,8 @@ pub struct ListFilesAppendFileCmd {
 /// `--force-rmdir dir`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ForceRmdirCmd {
     pub span: Span,
     pub dir: InterpolatedText,
@@ -630,6 +820,8 @@ pub struct ForceRmdirCmd {
 /// `--force-cpdir from_dir to_dir`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct ForceCpdirCmd {
     pub span: Span,
     pub source: InterpolatedText,
@@ -639,6 +831,8 @@ pub struct ForceCpdirCmd {
 /// `--save_master_pos` — no args
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SaveMasterPosCmd {
     pub span: Span,
 }
@@ -646,6 +840,8 @@ pub struct SaveMasterPosCmd {
 /// `--sync_with_master [offset]` — alias for sync_slave_with_master
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SyncWithMasterCmd {
     pub span: Span,
     pub offset: Option<String>,
@@ -654,6 +850,8 @@ pub struct SyncWithMasterCmd {
 /// `--wait_for_slave_to_stop`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct WaitForSlaveToStopCmd {
     pub span: Span,
 }
@@ -661,6 +859,8 @@ pub struct WaitForSlaveToStopCmd {
 /// `--skip_if_hypergraph [message]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SkipIfHypergraphCmd {
     pub span: Span,
     pub message: Option<InterpolatedText>,
@@ -669,6 +869,8 @@ pub struct SkipIfHypergraphCmd {
 /// `--evalp SQL` — MariaDB only, execute prepared statement
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct EvalPCmd {
     pub span: Span,
     pub sql: InterpolatedText,
@@ -677,6 +879,8 @@ pub struct EvalPCmd {
 /// `--write_line text file`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct WriteLineCmd {
     pub span: Span,
     pub text: InterpolatedText,
@@ -686,6 +890,8 @@ pub struct WriteLineCmd {
 /// `--dirty_close`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct DirtyCloseCmd {
     pub span: Span,
 }
@@ -693,6 +899,8 @@ pub struct DirtyCloseCmd {
 /// `--ping`
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct PingCmd {
     pub span: Span,
 }
@@ -702,6 +910,8 @@ pub struct PingCmd {
 /// `--PS_prepare stmt` (MariaDB Galera)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct PsPrepareCmd {
     pub span: Span,
     pub sql: InterpolatedText,
@@ -710,6 +920,8 @@ pub struct PsPrepareCmd {
 /// `--PS_bind name` (MariaDB Galera)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct PsBindCmd {
     pub span: Span,
     pub name: InterpolatedText,
@@ -718,6 +930,8 @@ pub struct PsBindCmd {
 /// `--PS_execute` (MariaDB Galera)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct PsExecuteCmd {
     pub span: Span,
 }
@@ -725,6 +939,8 @@ pub struct PsExecuteCmd {
 /// `--PS_close` (MariaDB Galera)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct PsCloseCmd {
     pub span: Span,
 }
@@ -732,6 +948,8 @@ pub struct PsCloseCmd {
 /// `--optimizer_trace` (MariaDB)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct OptimizerTraceCmd {
     pub span: Span,
 }

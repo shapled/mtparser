@@ -1,6 +1,6 @@
 [package]
 name = "mtparser"
-version = "0.3.1"
+version = "0.3.3"
 edition = "2024"
 description = "Parser for MySQL mysqltest and MariaDB mariadb-test files, built with winnow"
 license = "Apache-2.0"
@@ -22,7 +22,9 @@ winnow = "1.0"
 thiserror = "2"
 bitflags = "2"
 serde = { version = "1", features = ["derive"], optional = true }
+ts-rs = { version = "10", optional = true }
 
 [features]
 default = []
 serde = ["dep:serde"]
+typescript = ["dep:ts-rs"]

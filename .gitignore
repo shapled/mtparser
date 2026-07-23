@@ -1,1 +1,4 @@
 /target
+mtparser-core/bindings
+mtparser-wasm/types
+mtparser-wasm/pkg

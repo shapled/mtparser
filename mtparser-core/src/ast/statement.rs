@@ -5,24 +5,34 @@ use crate::ast::expr::Expr;
 /// Flow control block: if (expr) { body }
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct IfBlock {
     pub span: Span,
     pub condition: Expr,
     pub body: Vec<Statement>,
+    pub open_brace_span: Span,
+    pub close_brace_span: Span,
 }
 
 /// Flow control block: while (expr) { body }
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct WhileBlock {
     pub span: Span,
     pub condition: Expr,
     pub body: Vec<Statement>,
+    pub open_brace_span: Span,
+    pub close_brace_span: Span,
 }
 
 /// `end` (end of while loop, 5.7 only syntax)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct EndCmd {
     pub span: Span,
 }
@@ -30,15 +40,19 @@ pub struct EndCmd {
 /// Perl block: --perl ... END_PERL
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct PerlBlock {
     pub span: Span,
-    pub end_marker: String,
+    pub end_marker: EndMarker,
     pub content: String,
 }
 
 /// A comment line (# comment)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct CommentNode {
     pub span: Span,
     pub text: String,
@@ -47,6 +61,8 @@ pub struct CommentNode {
 /// A SQL statement (unrecognized command text)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct SqlStatement {
     pub span: Span,
     pub sql: String,
@@ -55,6 +71,8 @@ pub struct SqlStatement {
 /// The root AST node: a single mysqltest statement or command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub enum Statement {
     // ── Output ──────────────────────────────────────────────
     Echo(EchoCmd),

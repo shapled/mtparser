@@ -12,7 +12,7 @@ A Rust library that parses MySQL `mysqltest` and MariaDB `mariadb-test` `.test`/
 - Version-gated command recognition (e.g., `assert` requires 8.0+, `require` requires 5.7/MariaDB)
 - Flow control: `--if`/`--while` blocks with condition expressions, bare `if`/`while`, inline `if`
 - Parses 39,000+ MySQL files and 31,000+ MariaDB files at 100% success rate
-- 365 unit tests
+- 402 unit tests
 - Built entirely with [winnow](https://crates.io/crates/winnow) 1.0 parser combinators
 
 ## Architecture
@@ -44,7 +44,7 @@ parse_command = read name → lowercase → match → parse_cmd_xxx_args
 
 ```toml
 [dependencies]
-mtparser = "0.1"
+mtparser = "0.3"
 ```
 
 ## Library Usage

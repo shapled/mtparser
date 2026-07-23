@@ -21,6 +21,7 @@ use winnow::token::{take_till, take_while};
 
 use crate::ast::span::Span;
 use crate::ast::statement::*;
+use crate::ast::text::InterpolatedText;
 use crate::error::ParseError;
 use crate::version::MysqlVersion;
 
@@ -51,6 +52,10 @@ pub(crate) struct ParserState {
     pub(crate) version: MysqlVersion,
     pub(crate) delimiter: String,
     pub(crate) source: String,
+    /// Byte offset to add to LocatingSlice positions for absolute spans.
+    /// 0 for the main stream; set to body's source offset for sub-streams
+    /// created by `parse_command_body`.
+    pub(crate) base_offset: usize,
 }
 
 impl ParserState {
@@ -59,6 +64,7 @@ impl ParserState {
             version,
             delimiter: ";".to_string(),
             source: source.to_string(),
+            base_offset: 0,
         }
     }
 }
@@ -69,8 +75,8 @@ pub(crate) type Stream<'s> = Stateful<LocatingSlice<&'s str>, ParserState>;
 /// Convert a byte-offset range from `LocatingSlice` into an `ast::Span`.
 pub(crate) fn range_to_span(stream: &Stream, range: Range<usize>) -> Span {
     let source = &stream.state.source;
-    let offset = range.start.min(source.len());
-    let end = range.end.min(source.len());
+    let offset = (range.start + stream.state.base_offset).min(source.len());
+    let end = (range.end + stream.state.base_offset).min(source.len());
     let len = end - offset;
     let line = source[..offset].matches('\n').count() as u32 + 1;
     let last_nl = source[..offset].rfind('\n').map(|p| p + 1).unwrap_or(0);
@@ -146,10 +152,10 @@ fn peek_line_trimmed<'s>(stream: &mut Stream<'s>) -> winnow::ModalResult<(&'s st
     let _: winnow::ModalResult<char> = winnow::token::one_of(['\n']).parse_next(stream);
     let _: winnow::ModalResult<char> = winnow::token::one_of(['\r']).parse_next(stream);
     let trimmed = line_content.trim();
-    // Adjust range start to skip leading whitespace
-    let leading = line_content.len() - trimmed.len();
-    // Range end should be the end of visible content, not including newline
-    let content_end = range.start + line_content.len();
+    // Adjust range start to skip leading whitespace only (not trailing).
+    let leading = line_content.len() - line_content.trim_start().len();
+    // Range end: precise end of the trimmed text.
+    let content_end = range.start + leading + trimmed.len();
     let adjusted_range = (range.start + leading)..content_end;
     Ok((trimmed, adjusted_range))
 }
@@ -413,16 +419,30 @@ pub(crate) fn classify_command(word: &str) -> CommandKind {
 
 /// Parse filename and END_MARKER from arguments.
 /// Uses winnow `parse_quoted_arg` for quote-wrapped filenames.
-fn parse_file_args(args: &str) -> Result<(String, String), ParseError> {
-    let mut stream: &str = args.trim();
+///
+/// Returns `(filename, filename_offset_in_args, end_marker_name, marker_range_in_args)`
+/// where the offsets/ranges are byte positions within the input `args` slice.
+/// When no explicit marker is given, `end_marker_name` defaults to `"EOF"` and
+/// `marker_range_in_args` is empty (zero-length) at the position right after the
+/// filename — signalling an implicit marker with no source text.
+fn parse_file_args(args: &str) -> Result<(String, usize, String, Range<usize>), ParseError> {
+    let trimmed = args.trim();
+    // Byte offset of `trimmed` start within `args` (leading whitespace skipped).
+    let trimmed_start = args.len() - args.trim_start().len();
+    let mut stream: &str = trimmed;
 
     // Try quoted form: "filename" or 'filename' or `filename`
     if let Ok(content) = command::parse_quoted_arg(&mut stream) {
-        let rest = stream.trim();
-        let end_marker = if rest.is_empty() {
-            "EOF".to_string()
+        // Bytes consumed by the quoted arg (including both quotes).
+        let quoted_consumed = trimmed.len() - stream.len();
+        let rest_full = stream;
+        let rest = rest_full.trim();
+        let rest_leading = rest_full.len() - rest.len();
+        let marker_start = trimmed_start + quoted_consumed + rest_leading;
+        let (end_marker, marker_range) = if rest.is_empty() {
+            ("EOF".to_string(), marker_start..marker_start)
         } else {
-            rest.to_string()
+            (rest.to_string(), marker_start..marker_start + rest.len())
         };
         if content.trim().is_empty() {
             return Err(ParseError::Syntax {
@@ -430,17 +450,23 @@ fn parse_file_args(args: &str) -> Result<(String, String), ParseError> {
                 span: Span::dummy(),
             });
         }
-        return Ok((content.trim().to_string(), end_marker));
+        let content_trimmed = content.trim();
+        // Offset within args: leading ws + 1 (opening quote) + inner leading ws
+        let content_leading = content.len() - content.trim_start().len();
+        let filename_offset = trimmed_start + 1 + content_leading;
+        return Ok((content_trimmed.to_string(), filename_offset, end_marker, marker_range));
     }
 
     // Unquoted form: filename [end_marker]
-    let filename = parse_filename_part(args.trim());
-    let rest = args.trim();
-    let after_name = &rest[filename.len()..].trim_start();
-    let end_marker = if after_name.is_empty() {
-        "EOF".to_string()
+    let filename = parse_filename_part(trimmed);
+    let after_name_full = &trimmed[filename.len()..];
+    let after_name = after_name_full.trim_start();
+    let after_name_leading = after_name_full.len() - after_name.len();
+    let marker_start = trimmed_start + filename.len() + after_name_leading;
+    let (end_marker, marker_range) = if after_name.is_empty() {
+        ("EOF".to_string(), marker_start..marker_start)
     } else {
-        after_name.to_string()
+        (after_name.to_string(), marker_start..marker_start + after_name.len())
     };
     if filename.is_empty() {
         return Err(ParseError::Syntax {
@@ -448,7 +474,7 @@ fn parse_file_args(args: &str) -> Result<(String, String), ParseError> {
             span: Span::dummy(),
         });
     }
-    Ok((filename, end_marker))
+    Ok((filename, trimmed_start, end_marker, marker_range))
 }
 
 /// Extract the filename part (until whitespace) using winnow `take_till`.
@@ -465,8 +491,21 @@ fn parse_filename_part_inner<'s>(input: &mut &'s str) -> winnow::ModalResult<&'s
 }
 
 /// Read lines from the stream until we find a line that exactly matches the end_marker.
-fn read_until_end_marker(stream: &mut Stream, end_marker: &str) -> Result<String, ParseError> {
-    let mut content = String::new();
+///
+/// Returns `(content, terminator_range)` where:
+/// - `content` is built from the **exact source bytes** covering the content
+///   region (from the first content line to just before the end_marker line).
+///   Using the source slice — rather than concatenating lines with normalized
+///   '\n' — preserves blank lines and original line endings, which is essential
+///   for correct InterpolatedText part spans.
+/// - `terminator_range` is the stream-relative byte range of the marker text on
+///   the terminating line (e.g. the `EOF` that closes the block), used to build
+///   the EndMarker's close_span.
+fn read_until_end_marker(
+    stream: &mut Stream,
+    end_marker: &str,
+) -> Result<(String, Range<usize>), ParseError> {
+    let content_start = stream.input.current_token_start();
     let mut start_span = Span::dummy();
 
     loop {
@@ -477,7 +516,9 @@ fn read_until_end_marker(stream: &mut Stream, end_marker: &str) -> Result<String
                 span: start_span,
             });
         }
-        // Get original (untrimmed) line for content, but trim for marker comparison
+        // Record the offset of this line BEFORE consuming it — when it turns
+        // out to be the end_marker, this is where the content ends.
+        let line_start = stream.input.current_token_start();
         let line = read_line_original(stream)
             .map_err(|e| modal_err_to_parse_err(e, start_span, "read_until_end_marker"))?;
         if start_span == Span::dummy() {
@@ -485,12 +526,28 @@ fn read_until_end_marker(stream: &mut Stream, end_marker: &str) -> Result<String
         }
 
         if line.trim() == end_marker {
-            return Ok(content);
+            let source = &stream.state.source;
+            let base = stream.state.base_offset;
+            let start = (content_start + base).min(source.len());
+            let end = (line_start + base).min(source.len());
+            let mut content = source[start..end].to_string();
+            // Strip exactly one trailing line ending — the last content line's
+            // terminator that precedes the end_marker line. This matches the
+            // established semantics that content has no trailing newline.
+            if content.ends_with('\n') {
+                content.pop();
+                if content.ends_with('\r') {
+                    content.pop();
+                }
+            }
+            // Range of the marker text on the terminator line (skip leading
+            // whitespace of that line).
+            let line_leading = line.len() - line.trim_start().len();
+            let marker_len = end_marker.len();
+            let terminator_range =
+                (line_start + line_leading)..(line_start + line_leading + marker_len);
+            return Ok((content, terminator_range));
         }
-        if !content.is_empty() {
-            content.push('\n');
-        }
-        content.push_str(line);
     }
 }
 
@@ -513,10 +570,12 @@ fn parse_delimiter_terminated(stream: &mut Stream, span: Span) -> Result<Stateme
         // Use parse_line to get the original (untrimmed) line content
         let line = parse_line(stream)
             .map_err(|e| modal_err_to_parse_err(e, span, "parse_delimiter_terminated"))?;
-        if start_range.is_none() {
-            // Record approximate start — we consumed the line so we use the
-            // span from the caller
-            start_range = Some(span.offset..span.offset + span.len);
+        // Track the byte range covering all accumulated lines
+        let line_end = stream.input.previous_token_end();
+        if let Some(r) = start_range.as_mut() {
+            r.end = line_end;
+        } else {
+            start_range = Some(span.offset..line_end);
         }
         let trimmed = line.trim_end();
 
@@ -558,11 +617,13 @@ fn parse_command_body(
             // so set it to empty string — this tells arg_rest to read to
             // end of input (supports multi-line bare command bodies).
             let real_delim = stream.state.delimiter.clone();
+            let trimmed = body.trim();
             let mut sub_stream = Stream {
-                input: LocatingSlice::new(body.trim()),
+                input: LocatingSlice::new(trimmed),
                 state: stream.state.clone(),
             };
             sub_stream.state.delimiter.clear();
+            sub_stream.state.base_offset = span.offset;
             let mut stmt = command::parse_command(&mut sub_stream)
                 .map_err(|e| modal_err_to_parse_err(e, span, "command body"))?;
             // Override span: sub_stream's LocatingSlice starts at offset 0,
@@ -616,6 +677,11 @@ pub(crate) fn parse_cmd_if_args(
                     sql: body_text.into(),
                 })]
             };
+            // Brace spans: both braces are on this line.
+            let open_brace_off = span_start + brace_pos;
+            let close_brace_off = span_start + condition_line.rfind('}').unwrap_or(open_brace_off);
+            let open_brace_span = range_to_span(stream, open_brace_off..open_brace_off + 1);
+            let close_brace_span = range_to_span(stream, close_brace_off..close_brace_off + 1);
             // Consume newline after the inline block
             let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
             return Ok(if is_while {
@@ -623,12 +689,16 @@ pub(crate) fn parse_cmd_if_args(
                     span: range_to_span(stream, span_start..stream.input.previous_token_end()),
                     condition,
                     body,
+                    open_brace_span,
+                    close_brace_span,
                 })
             } else {
                 Statement::If(IfBlock {
                     span: range_to_span(stream, span_start..stream.input.previous_token_end()),
                     condition,
                     body,
+                    open_brace_span,
+                    close_brace_span,
                 })
             });
         }
@@ -639,21 +709,28 @@ pub(crate) fn parse_cmd_if_args(
             state: stream.state.clone(),
         };
         let condition = crate::parser::flow::parse_condition_stream(&mut cond_stream)?;
+        let open_brace_off = span_start + brace_pos;
+        let open_brace_span = range_to_span(stream, open_brace_off..open_brace_off + 1);
         // Consume newline
         let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
         let body = parse_statements(stream)?;
-        consume_close_brace_modal(stream)?;
+        let close_brace_range = consume_close_brace_modal(stream)?;
+        let close_brace_span = range_to_span(stream, close_brace_range);
         return Ok(if is_while {
             Statement::While(WhileBlock {
                 span: range_to_span(stream, span_start..stream.input.previous_token_end()),
                 condition,
                 body,
+                open_brace_span,
+                close_brace_span,
             })
         } else {
             Statement::If(IfBlock {
                 span: range_to_span(stream, span_start..stream.input.previous_token_end()),
                 condition,
                 body,
+                open_brace_span,
+                close_brace_span,
             })
         });
     }
@@ -661,24 +738,52 @@ pub(crate) fn parse_cmd_if_args(
     // { not on this line — scan subsequent lines
     let mut condition_parts = vec![condition_line.trim().to_string()];
     let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
-    let mut found_brace = false;
 
     while !stream.input.is_empty() {
         let remaining = *stream.input;
         let trimmed = remaining.trim_start();
         if let Some(brace_pos) = trimmed.find('{') {
-            found_brace = true;
             let before = trimmed[..brace_pos].trim();
             if !before.is_empty() {
                 condition_parts.push(before.to_string());
             }
+            // Capture open brace offset before consuming.
+            let line_offset = stream.input.current_token_start();
+            let leading_ws = remaining.len() - trimmed.len();
+            let open_brace_off = line_offset + leading_ws + brace_pos;
             // Consume up to and including {
             let skip = remaining.len() - trimmed.len() + brace_pos + 1;
             for _ in 0..skip {
                 let _: winnow::ModalResult<char> = winnow::token::any.parse_next(stream);
             }
             let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
-            break;
+            let full_condition = condition_parts.join(" ");
+            let mut cond_stream = Stream {
+                input: LocatingSlice::new(&full_condition),
+                state: stream.state.clone(),
+            };
+            let condition = crate::parser::flow::parse_condition_stream(&mut cond_stream)?;
+            let open_brace_span = range_to_span(stream, open_brace_off..open_brace_off + 1);
+            let body = parse_statements(stream)?;
+            let close_brace_range = consume_close_brace_modal(stream)?;
+            let close_brace_span = range_to_span(stream, close_brace_range);
+            return Ok(if is_while {
+                Statement::While(WhileBlock {
+                    span: range_to_span(stream, span_start..stream.input.previous_token_end()),
+                    condition,
+                    body,
+                    open_brace_span,
+                    close_brace_span,
+                })
+            } else {
+                Statement::If(IfBlock {
+                    span: range_to_span(stream, span_start..stream.input.previous_token_end()),
+                    condition,
+                    body,
+                    open_brace_span,
+                    close_brace_span,
+                })
+            });
         }
         // No { on this line — part of condition
         let (line, _) = peek_line_trimmed(stream).unwrap_or(("", 0..0));
@@ -686,80 +791,95 @@ pub(crate) fn parse_cmd_if_args(
         let _ = consume_line_modal(stream); // Ignore error at EOF
     }
 
-    if !found_brace {
-        return Err(winnow::error::ErrMode::Cut({
-            let mut err = winnow::error::ContextError::new();
-            err.push(winnow::error::StrContext::Label(
-                "unterminated flow control 'if/while'",
-            ));
-            err
-        }));
-    }
-
-    let full_condition = condition_parts.join(" ");
-    let mut cond_stream = Stream {
-        input: LocatingSlice::new(&full_condition),
-        state: stream.state.clone(),
-    };
-    let condition = crate::parser::flow::parse_condition_stream(&mut cond_stream)?;
-    let body = parse_statements(stream)?;
-    consume_close_brace_modal(stream)?;
-    Ok(if is_while {
-        Statement::While(WhileBlock {
-            span: range_to_span(stream, span_start..stream.input.previous_token_end()),
-            condition,
-            body,
-        })
-    } else {
-        Statement::If(IfBlock {
-            span: range_to_span(stream, span_start..stream.input.previous_token_end()),
-            condition,
-            body,
-        })
-    })
+    Err(winnow::error::ErrMode::Cut({
+        let mut err = winnow::error::ContextError::new();
+        err.push(winnow::error::StrContext::Label(
+            "unterminated flow control 'if/while'",
+        ));
+        err
+    }))
 }
 
 /// Parse write_file from stream positioned AFTER the command name.
 pub(crate) fn parse_cmd_write_file_args(stream: &mut Stream) -> winnow::ModalResult<Statement> {
     let span_start = stream.input.current_token_start();
+    let base = stream.state.base_offset;
     let delim = stream.state.delimiter.clone();
-    let args = take_till(0.., ['\r', '\n']).parse_next(stream)?;
-    let args = args
+    let (args_raw, args_range) = take_till(0.., ['\r', '\n'])
+        .with_span()
+        .parse_next(stream)?;
+    let args = args_raw
         .trim()
         .strip_suffix(delim.as_str())
-        .unwrap_or(args.trim())
+        .unwrap_or(args_raw.trim())
         .trim();
+    // Leading whitespace within args_raw (args starts at args_raw.trim_start()).
+    let leading_in_raw = args_raw.len() - args_raw.trim_start().len();
     let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
-    let (filename, end_marker) = parse_file_args(args).map_err(|e| parse_err_to_modal(&e))?;
-    let content = read_until_end_marker(stream, &end_marker).map_err(|e| parse_err_to_modal(&e))?;
+    let (filename, filename_offset, marker_name, marker_range) =
+        parse_file_args(args).map_err(|e| parse_err_to_modal(&e))?;
+    let filename_abs_offset = args_range.start + leading_in_raw + filename_offset + base;
+    // Begin-line marker span (declares the marker name).
+    let open_span = range_to_span(
+        stream,
+        (args_range.start + leading_in_raw + marker_range.start)
+            ..(args_range.start + leading_in_raw + marker_range.end),
+    );
+    // Content begins at the current stream offset (start of first content line).
+    let content_abs_offset = stream.input.current_token_start() + base;
+    let (content, terminator_range) =
+        read_until_end_marker(stream, &marker_name).map_err(|e| parse_err_to_modal(&e))?;
+    let close_span = range_to_span(stream, terminator_range);
     let span = range_to_span(stream, span_start..stream.input.previous_token_end());
     Ok(Statement::WriteFile(crate::ast::commands::WriteFileCmd {
         span,
-        filename: filename.into(),
-        end_marker,
-        content: content.into(),
+        filename: InterpolatedText::parse_with_offset(&filename, filename_abs_offset),
+        end_marker: crate::ast::commands::EndMarker {
+            name: marker_name,
+            open_span,
+            close_span,
+        },
+        content: InterpolatedText::parse_with_offset(&content, content_abs_offset),
     }))
 }
 
 /// Parse append_file from stream positioned AFTER the command name.
 pub(crate) fn parse_cmd_append_file_args(stream: &mut Stream) -> winnow::ModalResult<Statement> {
     let span_start = stream.input.current_token_start();
+    let base = stream.state.base_offset;
     let delim = stream.state.delimiter.clone();
-    let args = take_till(0.., ['\r', '\n']).parse_next(stream)?;
-    let args = args
+    let (args_raw, args_range) = take_till(0.., ['\r', '\n'])
+        .with_span()
+        .parse_next(stream)?;
+    let args = args_raw
         .trim()
         .strip_suffix(delim.as_str())
-        .unwrap_or(args.trim())
+        .unwrap_or(args_raw.trim())
         .trim();
+    let leading_in_raw = args_raw.len() - args_raw.trim_start().len();
     let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
-    let (filename, end_marker) = parse_file_args(args).map_err(|e| parse_err_to_modal(&e))?;
-    let content = read_until_end_marker(stream, &end_marker).map_err(|e| parse_err_to_modal(&e))?;
+    let (filename, filename_offset, marker_name, marker_range) =
+        parse_file_args(args).map_err(|e| parse_err_to_modal(&e))?;
+    let filename_abs_offset = args_range.start + leading_in_raw + filename_offset + base;
+    let open_span = range_to_span(
+        stream,
+        (args_range.start + leading_in_raw + marker_range.start)
+            ..(args_range.start + leading_in_raw + marker_range.end),
+    );
+    let content_abs_offset = stream.input.current_token_start() + base;
+    let (content, terminator_range) =
+        read_until_end_marker(stream, &marker_name).map_err(|e| parse_err_to_modal(&e))?;
+    let close_span = range_to_span(stream, terminator_range);
     let span = range_to_span(stream, span_start..stream.input.previous_token_end());
     Ok(Statement::AppendFile(crate::ast::commands::AppendFileCmd {
         span,
-        filename: filename.into(),
-        end_marker,
-        content: content.into(),
+        filename: InterpolatedText::parse_with_offset(&filename, filename_abs_offset),
+        end_marker: crate::ast::commands::EndMarker {
+            name: marker_name,
+            open_span,
+            close_span,
+        },
+        content: InterpolatedText::parse_with_offset(&content, content_abs_offset),
     }))
 }
 
@@ -767,36 +887,73 @@ pub(crate) fn parse_cmd_append_file_args(stream: &mut Stream) -> winnow::ModalRe
 pub(crate) fn parse_cmd_perl_args(stream: &mut Stream) -> winnow::ModalResult<Statement> {
     let span_start = stream.input.current_token_start();
     let delim = stream.state.delimiter.clone();
-    let args = take_till(0.., ['\r', '\n']).parse_next(stream)?;
-    let args = args
+    let (args_raw, args_range) = take_till(0.., ['\r', '\n'])
+        .with_span()
+        .parse_next(stream)?;
+    let args = args_raw
         .trim()
         .strip_suffix(delim.as_str())
-        .unwrap_or(args.trim())
+        .unwrap_or(args_raw.trim())
         .trim();
-    let end_marker = if args.is_empty() {
-        "EOF".to_string()
+    let leading_in_raw = args_raw.len() - args_raw.trim_start().len();
+    let args_start = args_range.start + leading_in_raw;
+    let (marker_name, open_span) = if args.is_empty() {
+        // Implicit "EOF": zero-length span (no source text).
+        ("EOF".to_string(), range_to_span(stream, args_start..args_start))
     } else {
-        args.to_string()
+        (args.to_string(), range_to_span(stream, args_start..args_start + args.len()))
     };
     let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
-    let content = read_until_end_marker(stream, &end_marker).map_err(|e| parse_err_to_modal(&e))?;
+    let (content, terminator_range) =
+        read_until_end_marker(stream, &marker_name).map_err(|e| parse_err_to_modal(&e))?;
+    let close_span = range_to_span(stream, terminator_range);
     let span = range_to_span(stream, span_start..stream.input.previous_token_end());
     Ok(Statement::Perl(PerlBlock {
         span,
-        end_marker,
+        end_marker: crate::ast::commands::EndMarker {
+            name: marker_name,
+            open_span,
+            close_span,
+        },
         content,
     }))
 }
 
 /// Consume closing brace (ModalResult version).
-fn consume_close_brace_modal(stream: &mut Stream) -> winnow::ModalResult<()> {
+/// Handles all close-brace forms: `}`, `--}`, `-- }` (with optional leading
+/// whitespace). Returns the byte range of the `}` character (empty range if
+/// no close brace found).
+fn consume_close_brace_modal(stream: &mut Stream) -> winnow::ModalResult<Range<usize>> {
     let remaining = *stream.input;
-    if remaining.trim_start().starts_with('}') {
-        let _: &str = take_while(0.., [' ', '\t']).parse_next(stream)?;
-        let _: char = winnow::token::one_of('}').parse_next(stream)?;
-        let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
-    }
-    Ok(())
+    let trimmed = remaining.trim_start();
+    let leading_ws = remaining.len() - trimmed.len();
+
+    // Locate the `}` in supported forms: bare `}`, or `--` prefix + optional ws + `}`.
+    let brace_offset_in_trimmed = if trimmed.starts_with('}') {
+        Some(0)
+    } else if let Some(rest) = trimmed.strip_prefix("--") {
+        let ws_before_brace = rest.len() - rest.trim_start().len();
+        if rest.trim_start().starts_with('}') {
+            Some(2 + ws_before_brace)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let Some(offset_in_trimmed) = brace_offset_in_trimmed else {
+        let pos = stream.input.current_token_start();
+        return Ok(pos..pos);
+    };
+
+    let line_offset = stream.input.current_token_start();
+    let brace_start = line_offset + leading_ws + offset_in_trimmed;
+    let brace_end = brace_start + 1;
+    // Consume the rest of the close-brace line.
+    let _: &str = take_till(0.., ['\r', '\n']).parse_next(stream)?;
+    let _: &str = take_while(0.., ['\r', '\n']).parse_next(stream)?;
+    Ok(brace_start..brace_end)
 }
 
 /// Consume one line (ModalResult version).

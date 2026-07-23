@@ -5,6 +5,8 @@ use crate::ast::Span;
 /// A segment within interpolated text: either a literal string or a variable reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub enum TextPart {
     /// Literal text (including escaped `\$` → `$`, and bare `$` before non-identifier chars).
     Literal { text: String, span: Span },
@@ -20,6 +22,8 @@ pub enum TextPart {
 /// compute correct spans for each TextPart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
 pub struct InterpolatedText(Vec<TextPart>);
 
 impl InterpolatedText {

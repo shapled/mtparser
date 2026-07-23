@@ -8,7 +8,7 @@ use wasm_bindgen::prelude::*;
 /// @param version - Optional version: "5.7", "8.0", "8.4", "9.7", "mariadb", "compatible", or omit for all MySQL
 /// @returns Array of Statement objects, or throws on parse error
 #[wasm_bindgen]
-pub fn parse_test(input: &str, version: Option<String>) -> Result<JsValue, JsValue> {
+pub fn parse_mt(input: &str, version: Option<String>) -> Result<JsValue, JsValue> {
     let v = match version.as_deref() {
         Some("mariadb") => MysqlVersion::MariaDB,
         Some("5.7") => MysqlVersion::V57,

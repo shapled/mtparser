@@ -45,34 +45,41 @@ pub(crate) fn ws(s: &mut Stream) -> winnow::ModalResult<()> {
 /// and strips trailing delimiter.
 pub(crate) fn arg_rest(s: &mut Stream) -> winnow::ModalResult<InterpolatedText> {
     let _ = ws(s);
+    let base = s.state.base_offset;
     if s.state.delimiter.is_empty() {
         // Bare command body: delimiter already stripped, read everything
-        let rest: &str = winnow::token::rest.parse_next(s)?;
-        return Ok(InterpolatedText::from(rest.trim_end()));
+        let (rest, range) = winnow::token::rest::<_, winnow::error::ErrMode<winnow::error::ContextError>>
+            .with_span()
+            .parse_next(s)?;
+        let trimmed = rest.trim_end();
+        return Ok(InterpolatedText::parse_with_offset(trimmed, range.start + base));
     }
     // -- command: read until newline, strip trailing delimiter
-    let rest = take_till(0.., ['\r', '\n']).parse_next(s)?;
+    let (rest, range) = take_till(0.., ['\r', '\n']).with_span().parse_next(s)?;
     let trimmed = rest.trim_end();
     let delim = &s.state.delimiter;
     let stripped = trimmed
         .strip_suffix(delim.as_str())
         .unwrap_or(trimmed)
         .trim_end();
-    Ok(InterpolatedText::from(stripped))
+    Ok(InterpolatedText::parse_with_offset(stripped, range.start + base))
 }
 
 /// Take remaining input as [`InterpolatedText`], or `None` if empty.
 pub(crate) fn arg_rest_opt(s: &mut Stream) -> winnow::ModalResult<Option<InterpolatedText>> {
     let _ = ws(s);
+    let base = s.state.base_offset;
     if s.state.delimiter.is_empty() {
-        let rest: &str = winnow::token::rest.parse_next(s)?;
+        let (rest, range) = winnow::token::rest::<_, winnow::error::ErrMode<winnow::error::ContextError>>
+            .with_span()
+            .parse_next(s)?;
         let trimmed = rest.trim_end();
         if trimmed.is_empty() {
             return Ok(None);
         }
-        return Ok(Some(InterpolatedText::from(trimmed)));
+        return Ok(Some(InterpolatedText::parse_with_offset(trimmed, range.start + base)));
     }
-    let rest = take_till(0.., ['\r', '\n']).parse_next(s)?;
+    let (rest, range) = take_till(0.., ['\r', '\n']).with_span().parse_next(s)?;
     let trimmed = rest.trim_end();
     let delim = &s.state.delimiter;
     let stripped = trimmed
@@ -82,7 +89,7 @@ pub(crate) fn arg_rest_opt(s: &mut Stream) -> winnow::ModalResult<Option<Interpo
     if stripped.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(InterpolatedText::from(stripped)))
+        Ok(Some(InterpolatedText::parse_with_offset(stripped, range.start)))
     }
 }
 
@@ -138,6 +145,33 @@ pub(crate) fn arg_ws_tokens<'s>(s: &mut Stream<'s>) -> winnow::ModalResult<Vec<&
         take_while(1.., [' ', '\t']),
     )
     .parse_next(s)
+}
+
+/// Parse whitespace-separated tokens, returning each token alongside its byte
+/// range within the stream. Each range covers exactly the token bytes (no
+/// surrounding whitespace). Used by commands that need per-token offsets for
+/// correct `InterpolatedText` span computation.
+pub(crate) fn arg_ws_tokens_with_ranges<'s>(
+    s: &mut Stream<'s>,
+) -> winnow::ModalResult<Vec<(&'s str, std::ops::Range<usize>)>> {
+    use winnow::stream::Location;
+    let _ = ws(s)?;
+    let mut result = Vec::new();
+    loop {
+        let remaining = *s.input;
+        let next = remaining.as_bytes().first().copied();
+        match next {
+            None | Some(b'\n') | Some(b'\r') => break,
+            _ => {}
+        }
+        let before = s.input.current_token_start();
+        let tok = take_till(1.., [' ', '\t', '\n', '\r']).parse_next(s)?;
+        let after = s.input.previous_token_end();
+        result.push((tok, before..after));
+        // Consume inter-token whitespace (spaces/tabs).
+        let _: winnow::ModalResult<&str> = take_while(0.., [' ', '\t']).parse_next(s);
+    }
+    Ok(result)
 }
 
 /// Parse comma-separated elements, each surrounded by optional whitespace.
