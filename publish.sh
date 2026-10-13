@@ -1,28 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# publish.sh — Build and publish mtparser
+# publish.sh — Build and publish mtparser (Gleam)
 #
 # Usage:
-#   ./publish.sh build-js     # Build WASM + TS types (no publish)
-#   ./publish.sh build-rs     # Build Rust crate (no publish)
-#   ./publish.sh js           # Build WASM + publish to npm
-#   ./publish.sh rs           # Build + publish Rust crate to crates.io
-#   ./publish.sh all          # Build + publish both
-#   ./publish.sh js --dry-run
+#   ./publish.sh build     # Build JS package into pkg/ (no publish)
+#   ./publish.sh npm       # Build + publish to npm as @shapled/mtparser
+#   ./publish.sh hex       # Publish the Gleam package to hex
+#   ./publish.sh all       # hex + npm
+#   ./publish.sh npm --dry-run
+#
+# The npm package replaces the old Rust/wasm one (../mtparser-rs, 0.3.x);
+# the version continues that lineage (gleam.toml is the single source of
+# truth — the JS consumer directly uses the compiled Gleam classes).
 
 MODE="${1:-all}"
 DRY_RUN="${2:-}"
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-RS_DIR="$ROOT/mtparser-core"
-WASM_DIR="$ROOT/mtparser-wasm"
+PKG="$ROOT/pkg"
+BUILD_JS="$ROOT/build/dev/javascript"
+
+NPM_NAME="@shapled/mtparser"
+# Always publish to the official registry — a locally configured mirror
+# (npmmirror etc.) must never receive the publish.
+NPM_REGISTRY="https://registry.npmjs.org"
 
 # ── Helpers ──────────────────────────────────────────────
 
-log() { echo -e "\033[1;32m▶\033[0m $1"; }
-warn() { echo -e "\033[1;33m⚠\033[0m $1"; }
-err() { echo -e "\033[1;31m✗\033[0m $1" >&2; }
+log() { echo -e "\033[1;32m▶\033[1;0m $1"; }
+warn() { echo -e "\033[1;33m⚠\033[1;0m $1"; }
+err() { echo -e "\033[1;31m✗\033[1;0m $1" >&2; }
 
 check_tool() {
     if ! command -v "$1" &>/dev/null; then
@@ -31,135 +39,179 @@ check_tool() {
     fi
 }
 
-# ── Rust crate ───────────────────────────────────────────
-
-build_rs() {
-    log "Building Rust crate..."
-    cd "$RS_DIR"
-    cargo build --release
+version() {
+    grep '^version' "$ROOT/gleam.toml" | head -1 | sed 's/version *= *"\(.*\)"/\1/'
 }
 
-publish_rs() {
-    build_rs
-
-    if [ "$DRY_RUN" = "--dry-run" ]; then
-        log "Dry run: cargo publish --dry-run"
-        cargo publish --dry-run
-        log "Rust dry run complete."
-    else
-        log "Publishing to crates.io..."
-        cargo publish
-        log "Rust crate published."
-    fi
-}
-
-# ── JS / WASM package ────────────────────────────────────
+# ── npm package ───────────────────────────────────────────
 
 build_js() {
-    check_tool wasm-pack
+    check_tool gleam
+    check_tool node
 
-    cd "$WASM_DIR"
+    log "Clean JavaScript build (with .d.mts declarations)..."
+    cd "$ROOT"
+    rm -rf build
+    gleam build --target javascript
 
-    # Generate TypeScript types via ts-rs (output to ./types/)
-    log "Generating TypeScript types..."
-    rm -rf types
-    mkdir -p types
-    TS_RS_EXPORT_DIR="$WASM_DIR/types" cargo test --features typescript -p mtparser 2>&1 | tail -1
+    if [ ! -f "$BUILD_JS/mtparser/mtparser.d.mts" ]; then
+        err "Type declarations missing — check [javascript] typescript_declarations in gleam.toml."
+        exit 1
+    fi
 
-    log "Building WASM package..."
-    wasm-pack build --release --target bundler
+    log "Assembling pkg/..."
+    rm -rf "$PKG"
+    mkdir -p "$PKG"
 
-    # wasm-pack names the package after the crate name (mtparser-wasm).
-    # Override to "@shapled/mtparser" for npm.
-    log "Setting npm package name to '@shapled/mtparser'..."
-    sed -i.bak 's/"name": "mtparser-wasm"/"name": "@shapled\/mtparser"/' pkg/package.json
-    rm -f pkg/package.json.bak
+    # The compiled tree is position-relative (prelude at the root, sibling
+    # package dirs) — copy it as-is, then prune what the library never
+    # imports: the test-only dependency gleeunit with the test modules,
+    # stdlib's Erlang FFI sources, and build metadata.
+    cp -R "$BUILD_JS"/. "$PKG"/
+    rm -rf "$PKG"/gleeunit
+    rm -rf "$PKG"/_gleam_artefacts "$PKG"/*/_gleam_artefacts
+    rm -f "$PKG"/gleam_stdlib/*.erl "$PKG"/fingerprint \
+        "$PKG"/mtparser/*_test.mjs "$PKG"/mtparser/*_test.d.mts \
+        "$PKG"/mtparser/gleam@@private_main*
 
-    # Copy generated TypeScript types into pkg
-    log "Copying TypeScript types into pkg..."
-    mkdir -p pkg/types
-    cp -r "$WASM_DIR/types/"* pkg/types/
+    local ver
+    ver="$(version)"
+    log "Writing package.json ($NPM_NAME@$ver)..."
+    cat > "$PKG/package.json" << JSON
+{
+  "name": "$NPM_NAME",
+  "version": "$ver",
+  "description": "Parser for MySQL mysqltest and MariaDB mariadb-test files",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shapled/mtparser.git"
+  },
+  "main": "./mtparser/mtparser.mjs",
+  "types": "./mtparser/mtparser.d.mts",
+  "exports": {
+    ".": {
+      "types": "./mtparser/mtparser.d.mts",
+      "default": "./mtparser/mtparser.mjs"
+    },
+    "./ast": {
+      "types": "./mtparser/mtparser/ast.d.mts",
+      "default": "./mtparser/mtparser/ast.mjs"
+    },
+    "./error": {
+      "types": "./mtparser/mtparser/error.d.mts",
+      "default": "./mtparser/mtparser/error.mjs"
+    },
+    "./helper": {
+      "types": "./mtparser/mtparser/helper.d.mts",
+      "default": "./mtparser/mtparser/helper.mjs"
+    },
+    "./parser": {
+      "types": "./mtparser/mtparser/parser.d.mts",
+      "default": "./mtparser/mtparser/parser.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "mtparser/",
+    "gleam_stdlib/",
+    "prelude.mjs",
+    "prelude.d.mts"
+  ]
+}
+JSON
 
-    # Generate barrel index.ts that re-exports all types
-    log "Generating type barrel..."
-    cat > pkg/types/index.ts << 'BARREL'
-// Auto-generated barrel — re-exports all types
-BARREL
-    for f in pkg/types/*.ts; do
-        [ "$(basename "$f")" = "index.ts" ] && continue
-        name=$(basename "$f" .ts)
-        echo "export type { $name } from './$name';" >> pkg/types/index.ts
-    done
+    # npm renders the README on the package page.
+    [ -f "$ROOT/README.md" ] && cp "$ROOT/README.md" "$PKG/README.md"
 
-    # Override .d.ts — import Statement for return type, re-export all from barrel
-    log "Writing typed declaration..."
-    cat > pkg/mtparser_wasm.d.ts << 'DTS'
-export type * from './types/index';
-import type { Statement } from './types/index';
+    smoke_test
 
-/**
- * Parse a mysqltest/mariadb-test file.
- * @param input - File content (.test or .inc)
- * @param version - "5.7", "8.0", "8.4", "9.7", "mariadb", "compatible", or omit for all MySQL
- * @returns Array of Statement objects, or throws on parse error
- */
-export function parse_mt(input: string, version?: string | null): Statement[];
-DTS
-
-    # Update package.json to include types directory
-    sed -i.bak2 's/"files": \[/"files": [\n    "types\/",/' pkg/package.json
-    rm -f pkg/package.json.bak2
-
-    # Show info
-    local version
-    version=$(grep '"version"' pkg/package.json | head -1 | sed 's/.*"\(.*\)".*/\1/')
     local size
-    size=$(du -sh pkg/mtparser_wasm_bg.wasm | cut -f1)
-    log "Package: @shapled/mtparser@$version (wasm: $size)"
+    size="$(du -sh "$PKG" | cut -f1)"
+    log "Package assembled: $NPM_NAME@$ver ($size)"
+}
+
+smoke_test() {
+    log "Smoke test: import + parse + instanceof..."
+    cd "$PKG"
+    node --input-type=module -e '
+import { parse } from "./mtparser/mtparser.mjs";
+import { Ok } from "./gleam_stdlib/gleam.mjs";
+import { DashCommand, Echo } from "./mtparser/mtparser/ast.mjs";
+
+const result = parse("--echo hello $var\n");
+if (!(result instanceof Ok)) throw new Error("parse failed");
+const stmts = [...result[0]];
+if (stmts.length !== 1) throw new Error("expected 1 statement");
+const stmt = stmts[0];
+if (!(stmt instanceof DashCommand) || !(stmt.statement instanceof Echo))
+  throw new Error("expected DashCommand wrapping Echo");
+console.log("smoke ok:", [...stmt.statement.text].map(p => p.text ?? ("$" + p.name)).join(""));
+' || { err "Smoke test failed."; exit 1; }
+    cd "$ROOT"
 }
 
 publish_js() {
+    check_tool npm
+
+    if [ "$DRY_RUN" != "--dry-run" ]; then
+        log "Verifying npm login on $NPM_REGISTRY..."
+        if ! npm whoami --registry="$NPM_REGISTRY" &>/dev/null; then
+            err "Not logged in to $NPM_REGISTRY. Run: npm login --registry=$NPM_REGISTRY"
+            exit 1
+        fi
+    fi
+
     build_js
 
     if [ "$DRY_RUN" = "--dry-run" ]; then
-        log "Dry run: npm publish --access=public --dry-run"
-        cd pkg && npm publish --access=public --dry-run
-        log "JS dry run complete."
+        log "Dry run: npm publish --access=public --dry-run (registry: $NPM_REGISTRY)"
+        (cd "$PKG" && npm publish --access=public --dry-run --registry="$NPM_REGISTRY")
+        log "npm dry run complete."
     else
-        log "Publishing to npm..."
-        cd pkg && npm publish --access=public
-        log "JS package published."
+        log "Publishing to $NPM_REGISTRY..."
+        (cd "$PKG" && npm publish --access=public --registry="$NPM_REGISTRY")
+        log "npm package published."
     fi
+}
+
+# ── hex package ───────────────────────────────────────────
+
+publish_hex() {
+    check_tool gleam
+
+    if [ "$DRY_RUN" = "--dry-run" ]; then
+        warn "gleam publish has no dry run — skipping hex publish."
+        return
+    fi
+
+    log "Publishing Gleam package to hex..."
+    cd "$ROOT"
+    gleam publish
+    log "hex package published."
 }
 
 # ── Main ─────────────────────────────────────────────────
 
 main() {
     case "$MODE" in
-        build-js)
+        build)
             build_js
             ;;
-        build-rs)
-            build_rs
-            ;;
-        build-all)
-            build_rs
-            echo ""
-            build_js
-            ;;
-        rs)
-            publish_rs
-            ;;
-        js)
+        npm|js)
             publish_js
             ;;
+        hex)
+            publish_hex
+            ;;
         all)
-            publish_rs
+            publish_hex
             echo ""
             publish_js
             ;;
         *)
-            err "Usage: $0 {build-js|build-rs|build-all|js|rs|all} [--dry-run]"
+            err "Usage: $0 {build|npm|hex|all} [--dry-run]"
             exit 1
             ;;
     esac

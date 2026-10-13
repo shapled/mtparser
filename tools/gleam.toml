@@ -1,0 +1,14 @@
+name = "mtparser_tools"
+version = "0.4.1"
+description = "Integration-test harness for mtparser (Erlang-only dev tool)"
+licences = ["Apache-2.0"]
+
+[dependencies]
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+mtparser = { path = ".." }
+argv = ">= 1.1.0 and < 2.0.0"
+simplifile = ">= 2.7.0 and < 3.0.0"
+shellout = ">= 1.8.0 and < 2.0.0"
+
+[dev_dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"

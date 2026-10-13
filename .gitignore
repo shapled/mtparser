@@ -1,4 +1,7 @@
-/target
-mtparser-core/bindings
-mtparser-wasm/types
-mtparser-wasm/pkg
+*.beam
+*.ez
+/build
+erl_crash.dump
+mtparser-integration-report.txt
+pkg/
+/tools/build

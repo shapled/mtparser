@@ -1,3 +1,0 @@
-[workspace]
-members = ["mtparser-core", "mtparser-wasm"]
-resolver = "2"
